@@ -9,11 +9,12 @@ A local network-based SSH connection tool that automatically chooses between reg
 - 🌐 **Cross-platform**: Works on Linux, macOS, and WSL2
 - ⚙️ **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
 - 📦 **Multiple servers**: Support for multiple servers with consistent naming patterns
+- 🛡️ **IP-based detection**: Network-based detection for reliable home/away identification
 
 ## Security Model
 
-- **Home networks**: Convenient access with regular public key authentication
-- **External networks**: Enhanced security with mandatory security key (YubiKey, etc.) authentication
+- **Home networks**: Convenient access with regular public key authentication from trusted IP ranges
+- **External networks**: Enhanced security with mandatory security key (YubiKey, etc.) authentication from untrusted networks
 - **Server-side enforcement**: Actual security is enforced server-side based on source IP
 
 ## Installation
@@ -108,17 +109,17 @@ Match Address YOUR_HOME_IP
 
 ```bash
 # Connect to a server (automatically detects home/away)
-smart-ssh hostname
+smart-ssh production
 
 # Force security key authentication regardless of network
-smart-ssh --security-key hostname
-smart-ssh -s hostname
+smart-ssh --security-key bastion
+smart-ssh -s web-server
 
 # Use different security key temporarily
-SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key hostname
+SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key dev-server
 
 # Override home networks temporarily  
-HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh hostname
+HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh staging
 
 # Debug mode
 smart-ssh --debug
@@ -138,14 +139,21 @@ smart-ssh --help
 ## Example Workflow
 
 1. **At home (192.168.1.x)**: Connects using regular SSH key (no touch required)
-2. **At coffee shop (public IP)**: Connects using security key (YubiKey touch required)
+2. **At coffee shop (different IP range)**: Connects using security key (YubiKey touch required)
 3. **Force security key**: Use `--security-key` option to always use security key
 4. **Unknown network**: Prompts user to manually choose authentication method
+
+### Real-world scenarios:
+- `smart-ssh production` - Deploy to production server
+- `smart-ssh dev-server` - Connect to development environment  
+- `smart-ssh bastion` - Access jump host for internal network
+- `smart-ssh web-server` - Manage web server
 
 ## Security Benefits
 
 - **Convenience at home**: No need to touch security key for routine access from trusted networks
 - **Strong security away**: Mandatory hardware authentication prevents key theft attacks from external networks
+- **Network-based detection**: IP-based detection is more reliable than other methods
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
 

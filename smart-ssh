@@ -164,7 +164,7 @@ ssh_from_away() {
         echo "  ssh-keygen -t ecdsa-sk -f $SECURITY_KEY_PATH"
         echo ""
         echo "Or specify a different key using environment variable:"
-        echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key $hostname"
+        echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key production"
         exit 1
     fi
     
@@ -220,7 +220,7 @@ main() {
         echo "Example SSH configuration:"
         echo "# ~/.ssh/config"
         echo "Host $hostname"
-        echo "    HostName actual-server-address.com"
+        echo "    HostName your-server.example.com"
         echo "    User your-username"
         echo "    IdentityFile ~/.ssh/id_ed25519"
         echo ""
