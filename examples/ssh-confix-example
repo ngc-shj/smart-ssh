@@ -1,0 +1,38 @@
+# SSH Configuration Example for smart-ssh
+# Save as ~/.ssh/config
+
+# Global settings
+Host *
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    HashKnownHosts yes
+    IdentitiesOnly yes
+
+# Production server example
+Host production
+    HostName prod.example.com
+    User deploy
+    Port 22
+    IdentityFile ~/.ssh/id_ed25519
+    PreferredAuthentications publickey
+
+# Development server example
+Host dev-server
+    HostName dev.example.com
+    User developer
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+    PreferredAuthentications publickey
+
+# Company server with jump host
+Host company-server
+    HostName internal.company.com
+    User employee
+    ProxyJump bastion.company.com
+    IdentityFile ~/.ssh/id_ed25519
+    PreferredAuthentications publickey
+
+# Notes:
+# 1. Regular SSH key should be specified in IdentityFile
+# 2. Security key will be used automatically with -i option when away from home
+# 3. These configurations work with both regular SSH and smart-ssh

@@ -1,0 +1,307 @@
+#!/bin/bash
+
+# smart-ssh - Local network-based SSH connection script
+# Automatically chooses between regular public key auth (home) and security key auth (away)
+# Usage: smart-ssh <hostname>
+# Example: smart-ssh hostname
+
+# Configuration
+# Home networks (can be overridden by environment variable, comma-separated)
+HOME_NETWORK="${HOME_NETWORK:-192.168.11.0/24}"
+# Security key path (can be overridden by environment variable)
+SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-$HOME/.ssh/id_ed25519_sk}"
+
+# Show usage information
+usage() {
+    echo "Usage: $0 <hostname>"
+    echo ""
+    echo "Examples:"
+    echo "  $0 hostname"
+    echo "  $0 production-server"
+    echo "  HOME_NETWORK=192.168.1.0/24,10.0.0.0/24 $0 hostname"
+    echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk $0 --security-key hostname"
+    echo ""
+    echo "Required SSH config pattern (~/.ssh/config):"
+    echo "  Host <hostname>                # Single host entry"
+    echo "                                 # Regular key specified in IdentityFile"
+    echo "                                 # Security key used with -i when away"
+    echo ""
+    echo "Options:"
+    echo "  --security-key, -s  Force security key authentication"
+    echo "  --debug, -d         Show debug information"
+    echo "  --help, -h          Show this help message"
+    echo ""
+    echo "Author: https://github.com/ngc-shj/smart-ssh"
+}
+
+# Get current local IP address
+get_current_ip() {
+    local ip
+    
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        local default_interface=$(route get default 2>/dev/null | grep interface: | awk '{print $2}')
+        if [ -n "$default_interface" ]; then
+            ip=$(ifconfig "$default_interface" 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}')
+        fi
+    elif grep -qi "microsoft.*wsl\|wsl.*microsoft" /proc/version 2>/dev/null || command -v powershell.exe >/dev/null 2>&1; then
+        # WSL2 - get Windows host WiFi IP (not WSL2 internal IP)
+        ip=$(powershell.exe -Command "
+            \$wifiAdapter = Get-NetAdapter | Where-Object {\$_.InterfaceDescription -like '*Wi-Fi*' -and \$_.Status -eq 'Up'}
+            if (\$wifiAdapter) {
+                \$ipConfig = Get-NetIPAddress -InterfaceIndex \$wifiAdapter.InterfaceIndex -AddressFamily IPv4 | Where-Object {\$_.AddressState -eq 'Preferred' -and \$_.IPAddress -notlike '169.254.*'}
+                if (\$ipConfig) {
+                    \$ipConfig.IPAddress
+                } else {
+                    'NOT_CONNECTED'
+                }
+            } else {
+                'NOT_CONNECTED'
+            }
+        " 2>/dev/null | tr -d '\r\n')
+    elif command -v ip >/dev/null 2>&1; then
+        # Linux with ip command
+        ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+')
+    elif command -v ifconfig >/dev/null 2>&1; then
+        # Linux/Unix with ifconfig
+        ip=$(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | sed 's/addr://')
+    else
+        echo "Error: Cannot determine local IP address" >&2
+        return 1
+    fi
+    
+    if [ -z "$ip" ] || [ "$ip" = "127.0.0.1" ]; then
+        echo "NOT_CONNECTED"
+    else
+        echo "$ip"
+    fi
+}
+
+# Convert IP address to 32-bit integer
+ip_to_int() {
+    local ip="$1"
+    local a b c d
+    IFS='.' read -r a b c d <<< "$ip"
+    echo $((a * 256 * 256 * 256 + b * 256 * 256 + c * 256 + d))
+}
+
+# Check if IP is in CIDR range using integer comparison
+ip_in_cidr() {
+    local ip="$1"
+    local cidr="$2"
+    
+    local network=$(echo "$cidr" | cut -d'/' -f1)
+    local mask_bits=$(echo "$cidr" | cut -d'/' -f2)
+    
+    # Convert IP and network to integers
+    local ip_int=$(ip_to_int "$ip")
+    local network_int=$(ip_to_int "$network")
+    
+    # Calculate network mask
+    local mask=$((0xFFFFFFFF << (32 - mask_bits)))
+    
+    # Apply mask to both IP and network
+    local ip_network=$((ip_int & mask))
+    local cidr_network=$((network_int & mask))
+    
+    # Check if they match
+    [ "$ip_network" -eq "$cidr_network" ]
+}
+
+# Check if current IP is in home network ranges
+is_home_network() {
+    local current_ip="$1"
+    
+    # Check if IP is valid
+    if [ "$current_ip" = "NOT_CONNECTED" ] || [ -z "$current_ip" ]; then
+        return 1
+    fi
+    
+    # Split HOME_NETWORK by comma and check each network
+    IFS=',' read -ra networks <<< "$HOME_NETWORK"
+    for network in "${networks[@]}"; do
+        # Trim whitespace
+        network=$(echo "$network" | xargs)
+        if ip_in_cidr "$current_ip" "$network"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Check SSH configuration exists (single host entry)
+check_ssh_config() {
+    local hostname="$1"
+    
+    # Use ssh -G to get actual configuration (handles Include directives)
+    if ! ssh -G "$hostname" >/dev/null 2>&1; then
+        echo "Warning: SSH configuration for '$hostname' not found"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Connect from home (regular public key authentication)
+ssh_from_home() {
+    local hostname="$1"
+    
+    echo "Home network connection detected. Connecting with regular public key authentication..."
+    echo "Target: $hostname"
+    ssh "$hostname"
+}
+
+# Connect from away (security key authentication)
+ssh_from_away() {
+    local hostname="$1"
+    
+    # Check if security key file exists
+    if [ ! -f "$SECURITY_KEY_PATH" ]; then
+        echo "Error: Security key file not found: $SECURITY_KEY_PATH"
+        echo ""
+        echo "Please generate a security key first:"
+        echo "  ssh-keygen -t ed25519-sk -f $SECURITY_KEY_PATH"
+        echo "  ssh-keygen -t ecdsa-sk -f $SECURITY_KEY_PATH"
+        echo ""
+        echo "Or specify a different key using environment variable:"
+        echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key $hostname"
+        exit 1
+    fi
+    
+    echo "External network detected. Connecting with security key authentication..."
+    echo "Please touch your YubiKey or security key when prompted."
+    echo "Target: $hostname (using $SECURITY_KEY_PATH)"
+    
+    # Use -i option to specify security key
+    ssh -i "$SECURITY_KEY_PATH" "$hostname"
+}
+
+# Main function
+main() {
+    local hostname=""
+    local force_security_key=false
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --security-key|-s)
+                force_security_key=true
+                shift
+                ;;
+            --debug|-d)
+                debug_info
+                exit 0
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+            *)
+                hostname="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$hostname" ]; then
+        echo "Error: Please specify a hostname"
+        usage
+        exit 1
+    fi
+    
+    # Check SSH configuration exists
+    if ! check_ssh_config "$hostname"; then
+        echo ""
+        echo "Example SSH configuration:"
+        echo "# ~/.ssh/config"
+        echo "Host $hostname"
+        echo "    HostName actual-server-address.com"
+        echo "    User your-username"
+        echo "    IdentityFile ~/.ssh/id_ed25519"
+        echo ""
+        echo "Note: Security key ($SECURITY_KEY_PATH) will be used automatically"
+        echo "      when connecting from external networks."
+        exit 1
+    fi
+    
+    # Force security key if requested
+    if [ "$force_security_key" = true ]; then
+        echo "Security key authentication forced by --security-key option"
+        ssh_from_away "$hostname"
+        return
+    fi
+    
+    echo "Checking local network..."
+    
+    CURRENT_IP=$(get_current_ip)
+    
+    if [ "$CURRENT_IP" = "NOT_CONNECTED" ]; then
+        echo "Cannot determine local IP address."
+        echo "Please manually select SSH connection method:"
+        echo "1) Regular public key authentication ($hostname)"
+        echo "2) Security key authentication ($hostname using $SECURITY_KEY_PATH)"
+        read -p "Choice (1/2): " choice
+        
+        case $choice in
+            1) ssh_from_home "$hostname" ;;
+            2) ssh_from_away "$hostname" ;;
+            *) echo "Invalid choice."; exit 1 ;;
+        esac
+    elif is_home_network "$CURRENT_IP"; then
+        echo "Home network detected: $CURRENT_IP"
+        ssh_from_home "$hostname"
+    else
+        echo "External network detected: $CURRENT_IP"
+        ssh_from_away "$hostname"
+    fi
+}
+
+# Show debug information
+debug_info() {
+    echo "=== Debug Information ==="
+    echo "Current IP: $(get_current_ip)"
+    echo "Configured home networks: $HOME_NETWORK"
+    echo "Security key path: $SECURITY_KEY_PATH"
+    echo "Security key file exists: $([ -f "$SECURITY_KEY_PATH" ] && echo "Yes" || echo "No")"
+    echo "Network connection status:"
+    
+    # Show platform-specific network info
+    if grep -qi "microsoft.*wsl\|wsl.*microsoft" /proc/version 2>/dev/null || command -v powershell.exe >/dev/null 2>&1; then
+        echo "WSL2 detected - showing Windows host network info:"
+        powershell.exe -Command "Get-NetAdapter | Where-Object {\$_.Status -eq 'Up'} | Select-Object Name,InterfaceDescription" 2>/dev/null
+        powershell.exe -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object {\$_.InterfaceAlias -like '*Wi-Fi*'} | Select-Object IPAddress,InterfaceAlias" 2>/dev/null
+    elif command -v ip >/dev/null 2>&1; then
+        ip addr show | grep -E "(inet |UP,)"
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        ifconfig | grep -E "(flags=|inet )" | grep -A1 "UP," | grep "inet "
+    fi
+    
+    echo ""
+    echo "SSH configuration check:"
+    if [ -f ~/.ssh/config ]; then
+        echo "~/.ssh/config exists"
+        echo "Available host entries:"
+        grep "^Host " ~/.ssh/config 2>/dev/null | head -10 || echo "  No Host entries found"
+    else
+        echo "~/.ssh/config does not exist"
+    fi
+    echo "========================="
+}
+
+# Handle options and arguments
+case "$1" in
+    --debug|-d)
+        debug_info
+        ;;
+    --help|-h|"")
+        usage
+        ;;
+    *)
+        main "$@"
+        ;;
+esac
