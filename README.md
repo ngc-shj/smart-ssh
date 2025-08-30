@@ -63,8 +63,8 @@ Create SSH host configurations with a single entry per server:
 # ~/.ssh/config
 
 # Server configuration (single entry)
-Host vps-tk1
-    HostName vps-tk1.example.com
+Host production
+    HostName production.example.com
     User myuser
     Port 22
     IdentityFile ~/.ssh/id_ed25519
