@@ -87,23 +87,42 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
 
 # Security key for away use (requires hardware key)
 ssh-keygen -t ed25519-sk -f ~/.ssh/id_ed25519_sk
+
+# Copy public keys to your servers
+ssh-copy-id -i ~/.ssh/id_ed25519.pub production
+ssh-copy-id -i ~/.ssh/id_ed25519_sk.pub production
 ```
 
-### 4. Server-side Configuration (Recommended)
+### 4. Server-side Configuration (Strongly Recommended)
 
-For true security, configure your server to enforce the authentication method based on source IP:
+For true security, configure your server to enforce authentication methods and key algorithms based on source IP:
 
 ```bash
-# /etc/ssh/sshd_config
+# /etc/ssh/sshd_config.d/99-smart-ssh.conf
 
-# Default: Security key required
-PubkeyAuthentication yes
-PubkeyAuthOptions touch-required
+# Smart-SSH Security Key Configuration
+# Match blocks are processed top-to-bottom, first match wins
 
-# Home IP: Regular public key allowed
-Match Address YOUR_HOME_IP
+# Trusted networks: Regular public key + security key algorithms
+Match Address 192.168.1.0/24,10.0.0.0/8,127.0.0.1,::1
+    PubkeyAcceptedAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com
     PubkeyAuthOptions none
+    AuthenticationMethods publickey
+
+# All other addresses: Security key algorithms ONLY
+Match all
+    PubkeyAcceptedAlgorithms sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com
+    PubkeyAuthOptions touch-required
+    AuthenticationMethods publickey
 ```
+
+Apply the configuration:
+```bash
+sudo sshd -t  # Test configuration
+sudo systemctl reload sshd  # Apply changes
+```
+
+**Important**: Update the IP addresses to match your actual home network and ISP ranges. Use `curl -4 ifconfig.co` to check your public IP and research the CIDR range.
 
 ## Usage
 
@@ -153,6 +172,7 @@ smart-ssh --help
 
 - **Convenience at home**: No need to touch security key for routine access from trusted networks
 - **Strong security away**: Mandatory hardware authentication prevents key theft attacks from external networks
+- **Algorithm enforcement**: Server-side algorithm restrictions prevent weak key attacks
 - **Network-based detection**: IP-based detection is more reliable than other methods
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
@@ -161,6 +181,7 @@ smart-ssh --help
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
+- Platform-specific WiFi detection tools (automatically detected)
 
 ## Contributing
 

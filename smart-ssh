@@ -7,7 +7,7 @@
 
 # Configuration
 # Home networks (can be overridden by environment variable, comma-separated)
-HOME_NETWORK="${HOME_NETWORK:-192.168.11.0/24}"
+HOME_NETWORK="${HOME_NETWORK:-192.168.1.0/24}"
 # Security key path (can be overridden by environment variable)
 SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-$HOME/.ssh/id_ed25519_sk}"
 
