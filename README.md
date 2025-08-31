@@ -181,7 +181,6 @@ smart-ssh --help
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
-- Platform-specific WiFi detection tools (automatically detected)
 
 ## Contributing
 
