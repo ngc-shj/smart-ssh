@@ -182,10 +182,6 @@ smart-ssh --help
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
 
-## Contributing
-
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for details.
-
 ## Author
 
 Created by NOGUCHI Shoji ([@ngc-shj](https://github.com/ngc-shj))
