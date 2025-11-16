@@ -13,6 +13,7 @@ A local network-based SSH connection tool that automatically chooses between reg
 - 🎨 **Color output**: Enhanced visibility with color-coded messages (respects `NO_COLOR`)
 - 🧪 **Dry-run mode**: Preview authentication method without connecting
 - ✅ **Input validation**: Robust error handling for IP addresses and CIDR formats
+- ⚙️ **Configuration file**: XDG-compliant config file support with flexible priority system
 
 ## Security Model
 
@@ -33,16 +34,37 @@ sudo mv smart-ssh /usr/local/bin/
 
 ## Configuration
 
-### 1. Configure Home Networks and Security Key
+smart-ssh supports three levels of configuration with the following priority:
+**Environment variable > Configuration file > Default values**
 
-Edit the script and update the configuration:
+### 1. Configuration File (Recommended)
+
+Create a configuration file to persist your settings:
 
 ```bash
-HOME_NETWORK="${HOME_NETWORK:-192.168.11.0/24}"  # Default, can be overridden by env var
-SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-$HOME/.ssh/id_ed25519_sk}"  # Default, can be overridden by env var
+# Initialize default configuration file
+smart-ssh --init-config
+
+# Edit the configuration file
+vi ~/.config/smart-ssh/config
 ```
 
-You can also override using environment variables:
+Configuration file format (`~/.config/smart-ssh/config`):
+
+```bash
+# Home networks (comma-separated CIDR ranges)
+HOME_NETWORK=192.168.1.0/24,10.0.0.0/24
+
+# Security key path
+SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
+
+# Log level (debug, info, warn, error)
+LOG_LEVEL=info
+```
+
+### 2. Environment Variables
+
+Override settings temporarily using environment variables:
 
 ```bash
 # Single network
@@ -58,7 +80,7 @@ export SECURITY_KEY_PATH="$HOME/.ssh/id_ecdsa_sk"
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh hostname
 ```
 
-### 2. SSH Configuration
+### 3. SSH Configuration
 
 Create SSH host configurations with a single entry per server:
 
@@ -82,7 +104,7 @@ Host production-server
 
 Note: Security key will be used automatically when connecting from external networks using the `-i` option.
 
-### 3. Generate SSH Keys
+### 4. Generate SSH Keys
 
 ```bash
 # Regular key for home use
@@ -96,7 +118,7 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub production
 ssh-copy-id -i ~/.ssh/id_ed25519_sk.pub production
 ```
 
-### 4. Server-side Configuration (Strongly Recommended)
+### 5. Server-side Configuration (Strongly Recommended)
 
 For true security, configure your server to enforce authentication methods and key algorithms based on source IP:
 
@@ -130,6 +152,9 @@ sudo systemctl reload sshd  # Apply changes
 ## Usage
 
 ```bash
+# First-time setup: Create configuration file
+smart-ssh --init-config
+
 # Connect to a server (automatically detects home/away)
 smart-ssh production
 
@@ -150,7 +175,7 @@ HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh staging
 # Disable color output
 NO_COLOR=1 smart-ssh production
 
-# Debug mode
+# Debug mode (show configuration and network info)
 smart-ssh --debug
 
 # Help
@@ -191,6 +216,202 @@ smart-ssh --help
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
+
+## Troubleshooting
+
+### Network Detection Issues
+
+**Problem**: smart-ssh cannot detect my IP address
+
+**Solutions**:
+
+1. Check your network connection:
+   ```bash
+   # macOS
+   ifconfig | grep "inet "
+
+   # Linux
+   ip addr show
+
+   # WSL2
+   powershell.exe -Command "Get-NetIPAddress -AddressFamily IPv4"
+   ```
+
+2. Use debug mode to see what's happening:
+   ```bash
+   smart-ssh --debug
+   ```
+
+3. Manually specify your authentication method when prompted
+
+**Problem**: Home network not detected even though I'm at home
+
+**Solutions**:
+
+1. Verify your current IP address is in the configured CIDR range:
+   ```bash
+   smart-ssh --debug
+   # Check "Current IP" vs "HOME_NETWORK"
+   ```
+
+2. Update your HOME_NETWORK configuration:
+   ```bash
+   # Edit config file
+   vi ~/.config/smart-ssh/config
+
+   # Or use environment variable
+   export HOME_NETWORK="192.168.1.0/24,10.0.0.0/8"
+   ```
+
+### Security Key Issues
+
+**Problem**: "Security key file not found"
+
+**Solutions**:
+
+1. Generate a security key:
+   ```bash
+   ssh-keygen -t ed25519-sk -f ~/.ssh/id_ed25519_sk
+   ```
+
+2. Verify the key path:
+   ```bash
+   ls -l ~/.ssh/id_ed25519_sk*
+   ```
+
+3. Update SECURITY_KEY_PATH if needed:
+   ```bash
+   # In config file
+   SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk
+
+   # Or environment variable
+   export SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk
+   ```
+
+**Problem**: "Please touch your YubiKey" but nothing happens
+
+**Solutions**:
+
+1. Ensure your security key is plugged in
+2. Try unplugging and replugging the key
+3. Check USB port permissions (Linux):
+   ```bash
+   sudo chmod a+rw /dev/usb/*
+   ```
+4. Verify the key works with ssh directly:
+   ```bash
+   ssh -i ~/.ssh/id_ed25519_sk hostname
+   ```
+
+### SSH Configuration Issues
+
+**Problem**: "SSH configuration for 'hostname' not found"
+
+**Solutions**:
+
+1. Check your SSH config file exists:
+   ```bash
+   ls -l ~/.ssh/config
+   ```
+
+2. Verify the host entry exists:
+   ```bash
+   grep "^Host " ~/.ssh/config
+   ```
+
+3. Create a host entry:
+   ```ssh-config
+   Host production
+       HostName prod.example.com
+       User myuser
+       IdentityFile ~/.ssh/id_ed25519
+   ```
+
+### Configuration File Issues
+
+**Problem**: Configuration file not being read
+
+**Solutions**:
+
+1. Verify file location:
+   ```bash
+   ls -l ~/.config/smart-ssh/config
+   ```
+
+2. Check file syntax (no spaces around `=`):
+   ```bash
+   # Correct
+   HOME_NETWORK=192.168.1.0/24
+
+   # Incorrect
+   HOME_NETWORK = 192.168.1.0/24
+   ```
+
+3. Recreate config file:
+   ```bash
+   smart-ssh --init-config
+   ```
+
+### Invalid CIDR Format Errors
+
+**Problem**: "Error: Invalid CIDR format"
+
+**Solutions**:
+
+1. Use proper CIDR notation:
+   ```bash
+   # Correct
+   HOME_NETWORK=192.168.1.0/24
+
+   # Incorrect
+   HOME_NETWORK=192.168.1
+   HOME_NETWORK=192.168.1.0
+   ```
+
+2. Check mask bits are 0-32:
+   ```bash
+   # Valid
+   10.0.0.0/8
+   192.168.0.0/16
+   192.168.1.0/24
+
+   # Invalid
+   192.168.1.0/33
+   ```
+
+### Dry-Run Mode
+
+Use dry-run mode to test without connecting:
+```bash
+smart-ssh --dry-run production
+```
+
+This shows exactly what command would be executed.
+
+### Enable Debug Logging
+
+Set LOG_LEVEL to debug for verbose output:
+```bash
+# In config file
+LOG_LEVEL=debug
+
+# Or environment variable
+LOG_LEVEL=debug smart-ssh production
+```
+
+### Still Having Issues?
+
+1. Run debug mode and review all settings:
+   ```bash
+   smart-ssh --debug
+   ```
+
+2. Test with environment variable override:
+   ```bash
+   HOME_NETWORK="192.168.1.0/24" smart-ssh --dry-run production
+   ```
+
+3. Report issues at: <https://github.com/ngc-shj/smart-ssh/issues>
 
 ## Author
 
