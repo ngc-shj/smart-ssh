@@ -16,6 +16,7 @@ A local network-based SSH connection tool that automatically chooses between reg
 - ⚙️ **Configuration file**: XDG-compliant config file support with flexible priority system
 - 🔧 **Tab completion**: Bash and Zsh completion for hostnames and options
 - 🧪 **Testing**: Comprehensive test suite with bats
+- 🔀 **SSH option pass-through**: Forward any SSH options (-v, -p, -L, etc.) to the underlying ssh command
 
 ## Security Model
 
@@ -159,6 +160,21 @@ smart-ssh --init-config
 
 # Connect to a server (automatically detects home/away)
 smart-ssh production
+
+# Pass SSH options (verbose mode)
+smart-ssh production -v
+
+# Use custom SSH port
+smart-ssh production -p 2222
+
+# Port forwarding with SSH options
+smart-ssh production -L 8080:localhost:80
+
+# Multiple SSH options
+smart-ssh production -v -p 2222 -L 8080:localhost:80
+
+# Use -- to clearly separate smart-ssh and SSH options
+smart-ssh --dry-run -- production -v -p 2222
 
 # Force security key authentication regardless of network
 smart-ssh --security-key bastion

@@ -143,11 +143,14 @@ log_debug() {
 
 # Show usage information
 usage() {
-    echo "Usage: $0 <hostname>"
+    echo "Usage: $0 [OPTIONS] <hostname> [SSH_OPTIONS]"
     echo ""
     echo "Examples:"
     echo "  $0 hostname"
     echo "  $0 production-server"
+    echo "  $0 hostname -v                    # Pass -v to ssh for verbose output"
+    echo "  $0 hostname -p 2222               # Use custom SSH port"
+    echo "  $0 -- hostname -v -p 2222         # Use -- to separate options"
     echo "  HOME_NETWORK=192.168.1.0/24,10.0.0.0/24 $0 hostname"
     echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk $0 --security-key hostname"
     echo ""
@@ -156,12 +159,17 @@ usage() {
     echo "                                 # Regular key specified in IdentityFile"
     echo "                                 # Security key used with -i when away"
     echo ""
-    echo "Options:"
+    echo "Smart-SSH Options:"
     echo "  --security-key, -s   Force security key authentication"
     echo "  --dry-run, -n        Show what would be executed without connecting"
     echo "  --init-config        Create default configuration file"
     echo "  --debug, -d          Show debug information"
     echo "  --help, -h           Show this help message"
+    echo "  --                   End of smart-ssh options (remaining args are SSH options)"
+    echo ""
+    echo "SSH Options:"
+    echo "  Any SSH options (like -v, -p, -L, etc.) are passed through to ssh."
+    echo "  Place them after the hostname or use -- to separate them clearly."
     echo ""
     echo "Configuration:"
     echo "  Config file: $CONFIG_FILE"
@@ -382,24 +390,37 @@ check_ssh_config() {
 ssh_from_home() {
     local hostname="$1"
     local dry_run="${2:-false}"
+    shift 2
+    local ssh_options=("$@")
 
     log_info "Home network connection detected. Connecting with regular public key authentication..."
     print_success "Home network connection detected. Connecting with regular public key authentication..."
     print_info "Target: $hostname"
 
     if [ "$dry_run" = true ]; then
-        print_debug "[DRY RUN] Would execute: ssh $hostname"
+        if [ ${#ssh_options[@]} -gt 0 ]; then
+            print_debug "[DRY RUN] Would execute: ssh ${ssh_options[*]} $hostname"
+        else
+            print_debug "[DRY RUN] Would execute: ssh $hostname"
+        fi
         return 0
     fi
 
-    log_debug "Executing: ssh $hostname"
-    ssh "$hostname"
+    if [ ${#ssh_options[@]} -gt 0 ]; then
+        log_debug "Executing: ssh ${ssh_options[*]} $hostname"
+        ssh "${ssh_options[@]}" "$hostname"
+    else
+        log_debug "Executing: ssh $hostname"
+        ssh "$hostname"
+    fi
 }
 
 # Connect from away (security key authentication)
 ssh_from_away() {
     local hostname="$1"
     local dry_run="${2:-false}"
+    shift 2
+    local ssh_options=("$@")
 
     # Check if security key file exists
     if [ ! -f "$SECURITY_KEY_PATH" ]; then
@@ -421,13 +442,21 @@ ssh_from_away() {
     print_info "Target: $hostname (using $SECURITY_KEY_PATH)"
 
     if [ "$dry_run" = true ]; then
-        print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH $hostname"
+        if [ ${#ssh_options[@]} -gt 0 ]; then
+            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+        else
+            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH $hostname"
+        fi
         return 0
     fi
 
-    log_debug "Executing: ssh -i $SECURITY_KEY_PATH $hostname"
-    # Use -i option to specify security key
-    ssh -i "$SECURITY_KEY_PATH" "$hostname"
+    if [ ${#ssh_options[@]} -gt 0 ]; then
+        log_debug "Executing: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+        ssh -i "$SECURITY_KEY_PATH" "${ssh_options[@]}" "$hostname"
+    else
+        log_debug "Executing: ssh -i $SECURITY_KEY_PATH $hostname"
+        ssh -i "$SECURITY_KEY_PATH" "$hostname"
+    fi
 }
 
 # Main function
@@ -435,6 +464,7 @@ main() {
     local hostname=""
     local force_security_key=false
     local dry_run=false
+    local ssh_options=()
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -459,14 +489,27 @@ main() {
                 usage
                 exit 0
                 ;;
+            --)
+                # End of smart-ssh options, rest are SSH options
+                shift
+                ssh_options+=("$@")
+                break
+                ;;
             -*)
-                print_error "Unknown option: $1"
-                usage
-                exit 1
+                # Could be SSH option, collect it
+                ssh_options+=("$1")
+                shift
                 ;;
             *)
-                hostname="$1"
-                shift
+                # First non-option argument is hostname
+                if [ -z "$hostname" ]; then
+                    hostname="$1"
+                    shift
+                else
+                    # Additional arguments are SSH options or remote command
+                    ssh_options+=("$1")
+                    shift
+                fi
                 ;;
         esac
     done
@@ -495,7 +538,7 @@ main() {
     # Force security key if requested
     if [ "$force_security_key" = true ]; then
         print_warning "Security key authentication forced by --security-key option"
-        ssh_from_away "$hostname" "$dry_run"
+        ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
         return
     fi
 
@@ -512,8 +555,13 @@ main() {
         if [ "$dry_run" = true ]; then
             print_debug "[DRY RUN] Manual selection would be required"
             print_debug "[DRY RUN] Options:"
-            print_debug "  1) Regular public key: ssh $hostname"
-            print_debug "  2) Security key: ssh -i $SECURITY_KEY_PATH $hostname"
+            if [ ${#ssh_options[@]} -gt 0 ]; then
+                print_debug "  1) Regular public key: ssh ${ssh_options[*]} $hostname"
+                print_debug "  2) Security key: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+            else
+                print_debug "  1) Regular public key: ssh $hostname"
+                print_debug "  2) Security key: ssh -i $SECURITY_KEY_PATH $hostname"
+            fi
             return 0
         fi
 
@@ -523,16 +571,16 @@ main() {
         read -p "Choice (1/2): " choice
 
         case $choice in
-            1) ssh_from_home "$hostname" "$dry_run" ;;
-            2) ssh_from_away "$hostname" "$dry_run" ;;
+            1) ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}" ;;
+            2) ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}" ;;
             *) print_error "Invalid choice."; exit 1 ;;
         esac
     elif is_home_network "$CURRENT_IP"; then
         print_success "Home network detected: $CURRENT_IP"
-        ssh_from_home "$hostname" "$dry_run"
+        ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}"
     else
         print_warning "External network detected: $CURRENT_IP"
-        ssh_from_away "$hostname" "$dry_run"
+        ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
     fi
 }
 
