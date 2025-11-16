@@ -621,8 +621,35 @@ debug_info() {
     echo "SSH configuration check:"
     if [ -f ~/.ssh/config ]; then
         echo "~/.ssh/config exists"
-        echo "Available host entries:"
-        grep "^Host " ~/.ssh/config 2>/dev/null | head -10 || echo "  No Host entries found"
+        echo "Available host entries (including Include directives):"
+
+        # Parse SSH config including Include directives (same logic as completions)
+        awk '
+            /^Include / {
+                # Expand ~ to HOME directory
+                include_path = $2
+                gsub(/^~/, ENVIRON["HOME"], include_path)
+                # Handle glob patterns
+                cmd = "ls -1 " include_path " 2>/dev/null"
+                while ((cmd | getline file) > 0) {
+                    while ((getline line < file) > 0) {
+                        if (line ~ /^Host /) {
+                            split(line, parts)
+                            for (i = 2; i <= length(parts); i++) {
+                                print parts[i]
+                            }
+                        }
+                    }
+                    close(file)
+                }
+                close(cmd)
+            }
+            /^Host / {
+                for (i = 2; i <= NF; i++) {
+                    print $i
+                }
+            }
+        ' ~/.ssh/config 2>/dev/null | grep -v "[*?!]" | sort -u | head -20 || echo "  No Host entries found"
     else
         echo "~/.ssh/config does not exist"
     fi
