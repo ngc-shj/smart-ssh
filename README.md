@@ -26,13 +26,55 @@ A local network-based SSH connection tool that automatically chooses between reg
 
 ## Installation
 
-```bash
-# Download the script
-curl -O https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh
-chmod +x smart-ssh
+### Option 1: Quick Install (Recommended)
 
-# Move to PATH
-sudo mv smart-ssh /usr/local/bin/
+```bash
+# Download and install to /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh | sudo tee /usr/local/bin/smart-ssh > /dev/null
+sudo chmod +x /usr/local/bin/smart-ssh
+
+# Verify installation
+smart-ssh --help
+```
+
+### Option 2: Manual Install
+
+```bash
+# Clone the repository
+git clone https://github.com/ngc-shj/smart-ssh.git
+cd smart-ssh
+
+# Install the script
+sudo cp smart-ssh /usr/local/bin/
+sudo chmod +x /usr/local/bin/smart-ssh
+
+# Install tab completions (optional)
+# For Bash
+sudo cp completions/smart-ssh.bash /etc/bash_completion.d/smart-ssh
+
+# For Zsh (Homebrew users)
+cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
+
+# Verify installation
+smart-ssh --help
+```
+
+### Option 3: User-local Install (No sudo required)
+
+```bash
+# Create local bin directory if it doesn't exist
+mkdir -p ~/.local/bin
+
+# Download and install
+curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh -o ~/.local/bin/smart-ssh
+chmod +x ~/.local/bin/smart-ssh
+
+# Add to PATH if not already (add to ~/.bashrc or ~/.zshrc)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+source ~/.bashrc  # or source ~/.zshrc
+
+# Verify installation
+smart-ssh --help
 ```
 
 ## Configuration
@@ -252,7 +294,10 @@ source ~/.bashrc
 ### Zsh Completion
 
 ```bash
-# Install to a directory in $fpath
+# For Homebrew users (recommended)
+cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
+
+# Or install to system directory
 sudo cp completions/_smart-ssh /usr/local/share/zsh/site-functions/_smart-ssh
 
 # Or add to your custom completion directory
@@ -265,9 +310,10 @@ source ~/.zshrc
 
 **Features**:
 
-- Complete hostnames from `~/.ssh/config`
+- Complete hostnames from `~/.ssh/config` (including `Include` directives)
 - Complete all command-line options
 - Works with combined options (e.g., `-s hostname`)
+- Context-aware completion: smart-ssh options before hostname, SSH options after
 
 ## Testing
 
