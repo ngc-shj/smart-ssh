@@ -1,0 +1,35 @@
+#compdef smart-ssh
+# Zsh completion for smart-ssh
+# Install: Copy to a directory in $fpath (e.g., /usr/local/share/zsh/site-functions/)
+# Or add to ~/.zshrc: fpath=(~/path/to/smart-ssh/completions $fpath)
+
+_smart-ssh() {
+    local -a options hosts
+
+    # Define available options
+    options=(
+        '(-s --security-key)'{-s,--security-key}'[Force security key authentication]'
+        '(-n --dry-run)'{-n,--dry-run}'[Show what would be executed without connecting]'
+        '--init-config[Create default configuration file]'
+        '(-d --debug)'{-d,--debug}'[Show debug information]'
+        '(-h --help)'{-h,--help}'[Show help message]'
+    )
+
+    # Extract SSH hosts from config file
+    if [[ -f ~/.ssh/config ]]; then
+        hosts=(${(f)"$(grep '^Host ' ~/.ssh/config 2>/dev/null | \
+                       awk '{print $2}' | \
+                       grep -v '[*?]' | \
+                       sort -u)"})
+    fi
+
+    # Alternate between options and hosts
+    _arguments -s -S \
+        $options \
+        '1:hostname:compadd -a hosts' \
+        && return 0
+
+    return 1
+}
+
+_smart-ssh "$@"

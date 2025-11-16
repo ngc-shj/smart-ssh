@@ -14,6 +14,8 @@ A local network-based SSH connection tool that automatically chooses between reg
 - 🧪 **Dry-run mode**: Preview authentication method without connecting
 - ✅ **Input validation**: Robust error handling for IP addresses and CIDR formats
 - ⚙️ **Configuration file**: XDG-compliant config file support with flexible priority system
+- 🔧 **Tab completion**: Bash and Zsh completion for hostnames and options
+- 🧪 **Testing**: Comprehensive test suite with bats
 
 ## Security Model
 
@@ -212,10 +214,89 @@ smart-ssh --help
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
 
+## Tab Completion
+
+smart-ssh supports tab completion for bash and zsh shells.
+
+### Bash Completion
+
+```bash
+# Install system-wide
+sudo cp completions/smart-ssh.bash /etc/bash_completion.d/smart-ssh
+
+# Or install for current user
+mkdir -p ~/.local/share/bash-completion/completions
+cp completions/smart-ssh.bash ~/.local/share/bash-completion/completions/smart-ssh
+
+# Or source directly in ~/.bashrc
+echo "source $(pwd)/completions/smart-ssh.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Zsh Completion
+
+```bash
+# Install to a directory in $fpath
+sudo cp completions/_smart-ssh /usr/local/share/zsh/site-functions/_smart-ssh
+
+# Or add to your custom completion directory
+mkdir -p ~/.zsh/completions
+cp completions/_smart-ssh ~/.zsh/completions/
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**Features**:
+
+- Complete hostnames from `~/.ssh/config`
+- Complete all command-line options
+- Works with combined options (e.g., `-s hostname`)
+
+## Testing
+
+smart-ssh includes a comprehensive test suite using [bats](https://github.com/bats-core/bats-core).
+
+### Install bats
+
+```bash
+# macOS
+brew install bats-core
+
+# Linux (from source)
+git clone https://github.com/bats-core/bats-core.git
+cd bats-core
+sudo ./install.sh /usr/local
+```
+
+### Run Tests
+
+```bash
+# Run all tests
+bats tests/test_smart_ssh.bats
+
+# Run with verbose output
+bats -t tests/test_smart_ssh.bats
+
+# Run specific test
+bats -f "validate IP" tests/test_smart_ssh.bats
+```
+
+**Test Coverage**:
+
+- Configuration file creation and parsing
+- IP address and CIDR validation
+- Environment variable priority
+- Command-line option handling
+- Dry-run mode
+- Debug mode
+- Help and usage output
+
 ## Requirements
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
+- Optional: bats-core for running tests
 
 ## Troubleshooting
 
