@@ -1,0 +1,106 @@
+#compdef smart-ssh
+# Zsh completion for smart-ssh
+# Install: Copy to a directory in $fpath (e.g., /usr/local/share/zsh/site-functions/)
+# Or add to ~/.zshrc: fpath=(~/path/to/smart-ssh/completions $fpath)
+
+# Get SSH hosts from config, respecting Include directives
+_smart_ssh_get_hosts() {
+    local config_file="${1:-$HOME/.ssh/config}"
+
+    # Parse the main config and any included configs using awk
+    awk '
+        /^Include / {
+            # Expand ~ to HOME directory
+            include_path = $2
+            gsub(/^~/, ENVIRON["HOME"], include_path)
+            # Handle glob patterns
+            cmd = "ls -1 " include_path " 2>/dev/null"
+            while ((cmd | getline file) > 0) {
+                while ((getline line < file) > 0) {
+                    if (line ~ /^Host /) {
+                        split(line, parts)
+                        for (i = 2; i <= length(parts); i++) {
+                            print parts[i]
+                        }
+                    }
+                }
+                close(file)
+            }
+            close(cmd)
+        }
+        /^Host / {
+            for (i = 2; i <= NF; i++) {
+                print $i
+            }
+        }
+    ' "$config_file" 2>/dev/null | grep -v "[*?!]" | sort -u
+}
+
+_smart-ssh() {
+    local -a options hosts ssh_options
+
+    # Smart-ssh specific options
+    options=(
+        '(-s --security-key)'{-s,--security-key}'[Force security key authentication]'
+        '(-n --dry-run)'{-n,--dry-run}'[Show what would be executed without connecting]'
+        '--init-config[Create default configuration file]'
+        '(-d --debug)'{-d,--debug}'[Show debug information]'
+        '(-h --help)'{-h,--help}'[Show help message]'
+        '--[End of smart-ssh options]'
+    )
+
+    # Common SSH options that can be passed through
+    ssh_options=(
+        '-v[Verbose mode]'
+        '-p[Port number]:port:'
+        '-L[Local port forwarding]:local forward:'
+        '-R[Remote port forwarding]:remote forward:'
+        '-D[Dynamic port forwarding]:dynamic forward:'
+        '-i[Identity file]:identity file:_files'
+        '-o[SSH option]:ssh option:'
+        '-F[Config file]:config file:_files'
+        '-J[Jump host]:jump host:'
+        '-W[Forward stdin/stdout]:host\:port:'
+        '-N[Do not execute remote command]'
+        '-T[Disable pseudo-terminal]'
+        '-f[Background mode]'
+        '-q[Quiet mode]'
+        '-4[IPv4 only]'
+        '-6[IPv6 only]'
+    )
+
+    # Extract SSH hosts from config file (including Include directives)
+    if [[ -f ~/.ssh/config ]]; then
+        hosts=(${(f)"$(_smart_ssh_get_hosts)"})
+    fi
+
+    # Check if we've passed the hostname
+    local hostname_seen=0
+    local i
+    for ((i=2; i<=$#words; i++)); do
+        if [[ ${words[$i]} != -* ]] && [[ ${words[$i]} != "--" ]]; then
+            hostname_seen=1
+            break
+        fi
+    done
+
+    # After hostname or --, allow SSH options
+    if [[ $hostname_seen -eq 1 ]] || [[ ${words[(I)--]} -gt 0 ]]; then
+        _arguments -s -S \
+            $options \
+            $ssh_options \
+            '1:hostname:compadd -a hosts' \
+            '*::ssh args:' \
+            && return 0
+    else
+        # Before hostname, only smart-ssh options
+        _arguments -s -S \
+            $options \
+            '1:hostname:compadd -a hosts' \
+            && return 0
+    fi
+
+    return 1
+}
+
+_smart-ssh "$@"

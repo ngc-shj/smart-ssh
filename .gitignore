@@ -35,3 +35,7 @@ Desktop.ini
 
 # Personal configuration (if users want to keep their own configs)
 config/personal/
+
+# Test artifacts
+tests/*.tmp
+tests/test-results/

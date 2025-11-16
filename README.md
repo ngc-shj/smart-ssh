@@ -10,6 +10,13 @@ A local network-based SSH connection tool that automatically chooses between reg
 - ⚙️ **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
 - 📦 **Multiple servers**: Support for multiple servers with consistent naming patterns
 - 🛡️ **IP-based detection**: Network-based detection for reliable home/away identification
+- 🎨 **Color output**: Enhanced visibility with color-coded messages (respects `NO_COLOR`)
+- 🧪 **Dry-run mode**: Preview authentication method without connecting
+- ✅ **Input validation**: Robust error handling for IP addresses and CIDR formats
+- ⚙️ **Configuration file**: XDG-compliant config file support with flexible priority system
+- 🔧 **Tab completion**: Bash and Zsh completion for hostnames and options
+- 🧪 **Testing**: Comprehensive test suite with bats
+- 🔀 **SSH option pass-through**: Forward any SSH options (-v, -p, -L, etc.) to the underlying ssh command
 
 ## Security Model
 
@@ -19,27 +26,90 @@ A local network-based SSH connection tool that automatically chooses between reg
 
 ## Installation
 
-```bash
-# Download the script
-curl -O https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh
-chmod +x smart-ssh
+### Option 1: Quick Install (Recommended)
 
-# Move to PATH
-sudo mv smart-ssh /usr/local/bin/
+```bash
+# Download and install to /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh | sudo tee /usr/local/bin/smart-ssh > /dev/null
+sudo chmod +x /usr/local/bin/smart-ssh
+
+# Verify installation
+smart-ssh --help
+```
+
+### Option 2: Manual Install
+
+```bash
+# Clone the repository
+git clone https://github.com/ngc-shj/smart-ssh.git
+cd smart-ssh
+
+# Install the script
+sudo cp smart-ssh /usr/local/bin/
+sudo chmod +x /usr/local/bin/smart-ssh
+
+# Install tab completions (optional)
+# For Bash
+sudo cp completions/smart-ssh.bash /etc/bash_completion.d/smart-ssh
+
+# For Zsh (Homebrew users)
+cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
+
+# Verify installation
+smart-ssh --help
+```
+
+### Option 3: User-local Install (No sudo required)
+
+```bash
+# Create local bin directory if it doesn't exist
+mkdir -p ~/.local/bin
+
+# Download and install
+curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh -o ~/.local/bin/smart-ssh
+chmod +x ~/.local/bin/smart-ssh
+
+# Add to PATH if not already (add to ~/.bashrc or ~/.zshrc)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+source ~/.bashrc  # or source ~/.zshrc
+
+# Verify installation
+smart-ssh --help
 ```
 
 ## Configuration
 
-### 1. Configure Home Networks and Security Key
+smart-ssh supports three levels of configuration with the following priority:
+**Environment variable > Configuration file > Default values**
 
-Edit the script and update the configuration:
+### 1. Configuration File (Recommended)
+
+Create a configuration file to persist your settings:
 
 ```bash
-HOME_NETWORK="${HOME_NETWORK:-192.168.11.0/24}"  # Default, can be overridden by env var
-SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-$HOME/.ssh/id_ed25519_sk}"  # Default, can be overridden by env var
+# Initialize default configuration file
+smart-ssh --init-config
+
+# Edit the configuration file
+vi ~/.config/smart-ssh/config
 ```
 
-You can also override using environment variables:
+Configuration file format (`~/.config/smart-ssh/config`):
+
+```bash
+# Home networks (comma-separated CIDR ranges)
+HOME_NETWORK=192.168.1.0/24,10.0.0.0/24
+
+# Security key path
+SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
+
+# Log level (debug, info, warn, error)
+LOG_LEVEL=info
+```
+
+### 2. Environment Variables
+
+Override settings temporarily using environment variables:
 
 ```bash
 # Single network
@@ -55,7 +125,7 @@ export SECURITY_KEY_PATH="$HOME/.ssh/id_ecdsa_sk"
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh hostname
 ```
 
-### 2. SSH Configuration
+### 3. SSH Configuration
 
 Create SSH host configurations with a single entry per server:
 
@@ -79,7 +149,7 @@ Host production-server
 
 Note: Security key will be used automatically when connecting from external networks using the `-i` option.
 
-### 3. Generate SSH Keys
+### 4. Generate SSH Keys
 
 ```bash
 # Regular key for home use
@@ -93,7 +163,7 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub production
 ssh-copy-id -i ~/.ssh/id_ed25519_sk.pub production
 ```
 
-### 4. Server-side Configuration (Strongly Recommended)
+### 5. Server-side Configuration (Strongly Recommended)
 
 For true security, configure your server to enforce authentication methods and key algorithms based on source IP:
 
@@ -127,20 +197,45 @@ sudo systemctl reload sshd  # Apply changes
 ## Usage
 
 ```bash
+# First-time setup: Create configuration file
+smart-ssh --init-config
+
 # Connect to a server (automatically detects home/away)
 smart-ssh production
+
+# Pass SSH options (verbose mode)
+smart-ssh production -v
+
+# Use custom SSH port
+smart-ssh production -p 2222
+
+# Port forwarding with SSH options
+smart-ssh production -L 8080:localhost:80
+
+# Multiple SSH options
+smart-ssh production -v -p 2222 -L 8080:localhost:80
+
+# Use -- to clearly separate smart-ssh and SSH options
+smart-ssh --dry-run -- production -v -p 2222
 
 # Force security key authentication regardless of network
 smart-ssh --security-key bastion
 smart-ssh -s web-server
 
+# Dry-run mode (preview what would be executed without connecting)
+smart-ssh --dry-run production
+smart-ssh -n staging
+
 # Use different security key temporarily
 SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key dev-server
 
-# Override home networks temporarily  
+# Override home networks temporarily
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh staging
 
-# Debug mode
+# Disable color output
+NO_COLOR=1 smart-ssh production
+
+# Debug mode (show configuration and network info)
 smart-ssh --debug
 
 # Help
@@ -177,10 +272,289 @@ smart-ssh --help
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
 
+## Tab Completion
+
+smart-ssh supports tab completion for bash and zsh shells.
+
+### Bash Completion
+
+```bash
+# Install system-wide
+sudo cp completions/smart-ssh.bash /etc/bash_completion.d/smart-ssh
+
+# Or install for current user
+mkdir -p ~/.local/share/bash-completion/completions
+cp completions/smart-ssh.bash ~/.local/share/bash-completion/completions/smart-ssh
+
+# Or source directly in ~/.bashrc
+echo "source $(pwd)/completions/smart-ssh.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Zsh Completion
+
+```bash
+# For Homebrew users (recommended)
+cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
+
+# Or install to system directory
+sudo cp completions/_smart-ssh /usr/local/share/zsh/site-functions/_smart-ssh
+
+# Or add to your custom completion directory
+mkdir -p ~/.zsh/completions
+cp completions/_smart-ssh ~/.zsh/completions/
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+source ~/.zshrc
+```
+
+**Features**:
+
+- Complete hostnames from `~/.ssh/config` (including `Include` directives)
+- Complete all command-line options
+- Works with combined options (e.g., `-s hostname`)
+- Context-aware completion: smart-ssh options before hostname, SSH options after
+
+## Testing
+
+smart-ssh includes a comprehensive test suite using [bats](https://github.com/bats-core/bats-core).
+
+### Install bats
+
+```bash
+# macOS
+brew install bats-core
+
+# Linux (from source)
+git clone https://github.com/bats-core/bats-core.git
+cd bats-core
+sudo ./install.sh /usr/local
+```
+
+### Run Tests
+
+```bash
+# Run all tests
+bats tests/test_smart_ssh.bats
+
+# Run with verbose output
+bats -t tests/test_smart_ssh.bats
+
+# Run specific test
+bats -f "validate IP" tests/test_smart_ssh.bats
+```
+
+**Test Coverage**:
+
+- Configuration file creation and parsing
+- IP address and CIDR validation
+- Environment variable priority
+- Command-line option handling
+- Dry-run mode
+- Debug mode
+- Help and usage output
+
 ## Requirements
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
+- Optional: bats-core for running tests
+
+## Troubleshooting
+
+### Network Detection Issues
+
+**Problem**: smart-ssh cannot detect my IP address
+
+**Solutions**:
+
+1. Check your network connection:
+   ```bash
+   # macOS
+   ifconfig | grep "inet "
+
+   # Linux
+   ip addr show
+
+   # WSL2
+   powershell.exe -Command "Get-NetIPAddress -AddressFamily IPv4"
+   ```
+
+2. Use debug mode to see what's happening:
+   ```bash
+   smart-ssh --debug
+   ```
+
+3. Manually specify your authentication method when prompted
+
+**Problem**: Home network not detected even though I'm at home
+
+**Solutions**:
+
+1. Verify your current IP address is in the configured CIDR range:
+   ```bash
+   smart-ssh --debug
+   # Check "Current IP" vs "HOME_NETWORK"
+   ```
+
+2. Update your HOME_NETWORK configuration:
+   ```bash
+   # Edit config file
+   vi ~/.config/smart-ssh/config
+
+   # Or use environment variable
+   export HOME_NETWORK="192.168.1.0/24,10.0.0.0/8"
+   ```
+
+### Security Key Issues
+
+**Problem**: "Security key file not found"
+
+**Solutions**:
+
+1. Generate a security key:
+   ```bash
+   ssh-keygen -t ed25519-sk -f ~/.ssh/id_ed25519_sk
+   ```
+
+2. Verify the key path:
+   ```bash
+   ls -l ~/.ssh/id_ed25519_sk*
+   ```
+
+3. Update SECURITY_KEY_PATH if needed:
+   ```bash
+   # In config file
+   SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk
+
+   # Or environment variable
+   export SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk
+   ```
+
+**Problem**: "Please touch your YubiKey" but nothing happens
+
+**Solutions**:
+
+1. Ensure your security key is plugged in
+2. Try unplugging and replugging the key
+3. Check USB port permissions (Linux):
+   ```bash
+   sudo chmod a+rw /dev/usb/*
+   ```
+4. Verify the key works with ssh directly:
+   ```bash
+   ssh -i ~/.ssh/id_ed25519_sk hostname
+   ```
+
+### SSH Configuration Issues
+
+**Problem**: "SSH configuration for 'hostname' not found"
+
+**Solutions**:
+
+1. Check your SSH config file exists:
+   ```bash
+   ls -l ~/.ssh/config
+   ```
+
+2. Verify the host entry exists:
+   ```bash
+   grep "^Host " ~/.ssh/config
+   ```
+
+3. Create a host entry:
+   ```ssh-config
+   Host production
+       HostName prod.example.com
+       User myuser
+       IdentityFile ~/.ssh/id_ed25519
+   ```
+
+### Configuration File Issues
+
+**Problem**: Configuration file not being read
+
+**Solutions**:
+
+1. Verify file location:
+   ```bash
+   ls -l ~/.config/smart-ssh/config
+   ```
+
+2. Check file syntax (no spaces around `=`):
+   ```bash
+   # Correct
+   HOME_NETWORK=192.168.1.0/24
+
+   # Incorrect
+   HOME_NETWORK = 192.168.1.0/24
+   ```
+
+3. Recreate config file:
+   ```bash
+   smart-ssh --init-config
+   ```
+
+### Invalid CIDR Format Errors
+
+**Problem**: "Error: Invalid CIDR format"
+
+**Solutions**:
+
+1. Use proper CIDR notation:
+   ```bash
+   # Correct
+   HOME_NETWORK=192.168.1.0/24
+
+   # Incorrect
+   HOME_NETWORK=192.168.1
+   HOME_NETWORK=192.168.1.0
+   ```
+
+2. Check mask bits are 0-32:
+   ```bash
+   # Valid
+   10.0.0.0/8
+   192.168.0.0/16
+   192.168.1.0/24
+
+   # Invalid
+   192.168.1.0/33
+   ```
+
+### Dry-Run Mode
+
+Use dry-run mode to test without connecting:
+```bash
+smart-ssh --dry-run production
+```
+
+This shows exactly what command would be executed.
+
+### Enable Debug Logging
+
+Set LOG_LEVEL to debug for verbose output:
+```bash
+# In config file
+LOG_LEVEL=debug
+
+# Or environment variable
+LOG_LEVEL=debug smart-ssh production
+```
+
+### Still Having Issues?
+
+1. Run debug mode and review all settings:
+   ```bash
+   smart-ssh --debug
+   ```
+
+2. Test with environment variable override:
+   ```bash
+   HOME_NETWORK="192.168.1.0/24" smart-ssh --dry-run production
+   ```
+
+3. Report issues at: <https://github.com/ngc-shj/smart-ssh/issues>
 
 ## Author
 

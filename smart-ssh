@@ -5,19 +5,152 @@
 # Usage: smart-ssh <hostname>
 # Example: smart-ssh hostname
 
-# Configuration
+# Configuration file path (XDG Base Directory compliant)
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/smart-ssh"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Default configuration values
+DEFAULT_HOME_NETWORK="192.168.1.0/24"
+DEFAULT_SECURITY_KEY_PATH="$HOME/.ssh/id_ed25519_sk"
+DEFAULT_LOG_LEVEL="info"
+
+# Load configuration from file if it exists
+load_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        # Source the config file in a safe manner
+        while IFS='=' read -r key value; do
+            # Skip comments and empty lines
+            [[ "$key" =~ ^#.*$ ]] && continue
+            [[ -z "$key" ]] && continue
+
+            # Remove leading/trailing whitespace
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs)
+
+            # Remove quotes from value if present
+            value="${value%\"}"
+            value="${value#\"}"
+            value="${value%\'}"
+            value="${value#\'}"
+
+            case "$key" in
+                HOME_NETWORK)
+                    CONFIG_HOME_NETWORK="$value"
+                    ;;
+                SECURITY_KEY_PATH)
+                    CONFIG_SECURITY_KEY_PATH="$value"
+                    ;;
+                LOG_LEVEL)
+                    CONFIG_LOG_LEVEL="$value"
+                    ;;
+            esac
+        done < "$CONFIG_FILE"
+    fi
+}
+
+# Load configuration
+load_config
+
+# Configuration priority: Environment variable > Config file > Default
 # Home networks (can be overridden by environment variable, comma-separated)
-HOME_NETWORK="${HOME_NETWORK:-192.168.1.0/24}"
+HOME_NETWORK="${HOME_NETWORK:-${CONFIG_HOME_NETWORK:-$DEFAULT_HOME_NETWORK}}"
 # Security key path (can be overridden by environment variable)
-SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-$HOME/.ssh/id_ed25519_sk}"
+SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-${CONFIG_SECURITY_KEY_PATH:-$DEFAULT_SECURITY_KEY_PATH}}"
+# Log level
+LOG_LEVEL="${LOG_LEVEL:-${CONFIG_LOG_LEVEL:-$DEFAULT_LOG_LEVEL}}"
+
+# Color output support (respects NO_COLOR environment variable)
+if [ -t 1 ] && [ -z "${NO_COLOR}" ]; then
+    COLOR_RESET='\033[0m'
+    COLOR_RED='\033[0;31m'
+    COLOR_GREEN='\033[0;32m'
+    COLOR_YELLOW='\033[0;33m'
+    COLOR_BLUE='\033[0;34m'
+    COLOR_CYAN='\033[0;36m'
+else
+    COLOR_RESET=''
+    COLOR_RED=''
+    COLOR_GREEN=''
+    COLOR_YELLOW=''
+    COLOR_BLUE=''
+    COLOR_CYAN=''
+fi
+
+# Log level constants
+LOG_LEVEL_DEBUG=0
+LOG_LEVEL_INFO=1
+LOG_LEVEL_WARN=2
+LOG_LEVEL_ERROR=3
+
+# Convert log level string to number
+get_log_level_number() {
+    case "${LOG_LEVEL,,}" in
+        debug) echo $LOG_LEVEL_DEBUG ;;
+        info) echo $LOG_LEVEL_INFO ;;
+        warn) echo $LOG_LEVEL_WARN ;;
+        error) echo $LOG_LEVEL_ERROR ;;
+        *) echo $LOG_LEVEL_INFO ;;
+    esac
+}
+
+CURRENT_LOG_LEVEL=$(get_log_level_number)
+
+# Print functions for colored output
+print_error() {
+    echo -e "${COLOR_RED}$*${COLOR_RESET}" >&2
+}
+
+print_success() {
+    echo -e "${COLOR_GREEN}$*${COLOR_RESET}"
+}
+
+print_warning() {
+    echo -e "${COLOR_YELLOW}$*${COLOR_RESET}"
+}
+
+print_info() {
+    echo -e "${COLOR_CYAN}$*${COLOR_RESET}"
+}
+
+print_debug() {
+    echo -e "${COLOR_BLUE}$*${COLOR_RESET}"
+}
+
+# Logging functions with log level support
+log_error() {
+    if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_ERROR" ]; then
+        print_error "[ERROR] $*"
+    fi
+}
+
+log_warn() {
+    if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_WARN" ]; then
+        print_warning "[WARN] $*"
+    fi
+}
+
+log_info() {
+    if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_INFO" ]; then
+        print_info "[INFO] $*"
+    fi
+}
+
+log_debug() {
+    if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_DEBUG" ]; then
+        print_debug "[DEBUG] $*"
+    fi
+}
 
 # Show usage information
 usage() {
-    echo "Usage: $0 <hostname>"
+    echo "Usage: $0 [OPTIONS] <hostname> [SSH_OPTIONS]"
     echo ""
     echo "Examples:"
     echo "  $0 hostname"
     echo "  $0 production-server"
+    echo "  $0 hostname -v                    # Pass -v to ssh for verbose output"
+    echo "  $0 hostname -p 2222               # Use custom SSH port"
+    echo "  $0 -- hostname -v -p 2222         # Use -- to separate options"
     echo "  HOME_NETWORK=192.168.1.0/24,10.0.0.0/24 $0 hostname"
     echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk $0 --security-key hostname"
     echo ""
@@ -26,12 +159,112 @@ usage() {
     echo "                                 # Regular key specified in IdentityFile"
     echo "                                 # Security key used with -i when away"
     echo ""
-    echo "Options:"
-    echo "  --security-key, -s  Force security key authentication"
-    echo "  --debug, -d         Show debug information"
-    echo "  --help, -h          Show this help message"
+    echo "Smart-SSH Options:"
+    echo "  --security-key, -s   Force security key authentication"
+    echo "  --dry-run, -n        Show what would be executed without connecting"
+    echo "  --init-config        Create default configuration file"
+    echo "  --debug, -d          Show debug information"
+    echo "  --help, -h           Show this help message"
+    echo "  --                   End of smart-ssh options (remaining args are SSH options)"
+    echo ""
+    echo "SSH Options:"
+    echo "  Any SSH options (like -v, -p, -L, etc.) are passed through to ssh."
+    echo "  Place them after the hostname or use -- to separate them clearly."
+    echo ""
+    echo "Configuration:"
+    echo "  Config file: $CONFIG_FILE"
+    echo "  Priority: Environment variable > Config file > Default"
     echo ""
     echo "Author: https://github.com/ngc-shj/smart-ssh"
+}
+
+# Initialize configuration file
+init_config() {
+    if [ -f "$CONFIG_FILE" ]; then
+        print_warning "Configuration file already exists: $CONFIG_FILE"
+        read -p "Overwrite? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Cancelled."
+            return 1
+        fi
+    fi
+
+    # Create config directory if it doesn't exist
+    mkdir -p "$CONFIG_DIR"
+
+    # Create default configuration file
+    cat > "$CONFIG_FILE" <<'EOF'
+# smart-ssh configuration file
+# This file follows the format: KEY=value
+# Lines starting with # are comments
+
+# Home networks (comma-separated CIDR ranges)
+# Example: HOME_NETWORK=192.168.1.0/24,10.0.0.0/24,172.16.0.0/12
+HOME_NETWORK=192.168.1.0/24
+
+# Security key path
+# Default: ~/.ssh/id_ed25519_sk
+SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
+
+# Log level (debug, info, warn, error)
+# Default: info
+LOG_LEVEL=info
+EOF
+
+    print_success "Configuration file created: $CONFIG_FILE"
+    echo ""
+    echo "Edit the file to customize your settings:"
+    echo "  ${EDITOR:-vi} $CONFIG_FILE"
+    return 0
+}
+
+# Validate IP address format
+validate_ip() {
+    local ip="$1"
+    local valid_ip_regex='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+
+    if ! [[ "$ip" =~ $valid_ip_regex ]]; then
+        return 1
+    fi
+
+    # Check each octet is 0-255
+    local IFS='.'
+    local -a octets=($ip)
+    for octet in "${octets[@]}"; do
+        if [ "$octet" -lt 0 ] || [ "$octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# Validate CIDR format
+validate_cidr() {
+    local cidr="$1"
+
+    if [[ ! "$cidr" =~ ^[^/]+/[0-9]+$ ]]; then
+        print_error "Error: Invalid CIDR format: $cidr"
+        echo "Expected format: IP/MASK (e.g., 192.168.1.0/24)" >&2
+        return 1
+    fi
+
+    local network=$(echo "$cidr" | cut -d'/' -f1)
+    local mask_bits=$(echo "$cidr" | cut -d'/' -f2)
+
+    # Validate IP address
+    if ! validate_ip "$network"; then
+        print_error "Error: Invalid IP address in CIDR: $network"
+        return 1
+    fi
+
+    # Validate mask bits (0-32)
+    if [ "$mask_bits" -lt 0 ] || [ "$mask_bits" -gt 32 ]; then
+        print_error "Error: Invalid network mask bits: $mask_bits (must be 0-32)"
+        return 1
+    fi
+
+    return 0
 }
 
 # Get current local IP address
@@ -89,21 +322,32 @@ ip_to_int() {
 ip_in_cidr() {
     local ip="$1"
     local cidr="$2"
-    
+
+    # Validate CIDR format
+    if ! validate_cidr "$cidr"; then
+        return 1
+    fi
+
+    # Validate IP address
+    if ! validate_ip "$ip"; then
+        print_error "Error: Invalid IP address: $ip"
+        return 1
+    fi
+
     local network=$(echo "$cidr" | cut -d'/' -f1)
     local mask_bits=$(echo "$cidr" | cut -d'/' -f2)
-    
+
     # Convert IP and network to integers
     local ip_int=$(ip_to_int "$ip")
     local network_int=$(ip_to_int "$network")
-    
+
     # Calculate network mask
     local mask=$((0xFFFFFFFF << (32 - mask_bits)))
-    
+
     # Apply mask to both IP and network
     local ip_network=$((ip_int & mask))
     local cidr_network=$((network_int & mask))
-    
+
     # Check if they match
     [ "$ip_network" -eq "$cidr_network" ]
 }
@@ -145,19 +389,43 @@ check_ssh_config() {
 # Connect from home (regular public key authentication)
 ssh_from_home() {
     local hostname="$1"
-    
-    echo "Home network connection detected. Connecting with regular public key authentication..."
-    echo "Target: $hostname"
-    ssh "$hostname"
+    local dry_run="${2:-false}"
+    shift 2
+    local ssh_options=("$@")
+
+    log_info "Home network connection detected. Connecting with regular public key authentication..."
+    print_success "Home network connection detected. Connecting with regular public key authentication..."
+    print_info "Target: $hostname"
+
+    if [ "$dry_run" = true ]; then
+        if [ ${#ssh_options[@]} -gt 0 ]; then
+            print_debug "[DRY RUN] Would execute: ssh ${ssh_options[*]} $hostname"
+        else
+            print_debug "[DRY RUN] Would execute: ssh $hostname"
+        fi
+        return 0
+    fi
+
+    if [ ${#ssh_options[@]} -gt 0 ]; then
+        log_debug "Executing: ssh ${ssh_options[*]} $hostname"
+        ssh "${ssh_options[@]}" "$hostname"
+    else
+        log_debug "Executing: ssh $hostname"
+        ssh "$hostname"
+    fi
 }
 
 # Connect from away (security key authentication)
 ssh_from_away() {
     local hostname="$1"
-    
+    local dry_run="${2:-false}"
+    shift 2
+    local ssh_options=("$@")
+
     # Check if security key file exists
     if [ ! -f "$SECURITY_KEY_PATH" ]; then
-        echo "Error: Security key file not found: $SECURITY_KEY_PATH"
+        log_error "Security key file not found: $SECURITY_KEY_PATH"
+        print_error "Error: Security key file not found: $SECURITY_KEY_PATH"
         echo ""
         echo "Please generate a security key first:"
         echo "  ssh-keygen -t ed25519-sk -f $SECURITY_KEY_PATH"
@@ -167,26 +435,51 @@ ssh_from_away() {
         echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key production"
         exit 1
     fi
-    
-    echo "External network detected. Connecting with security key authentication..."
-    echo "Please touch your YubiKey or security key when prompted."
-    echo "Target: $hostname (using $SECURITY_KEY_PATH)"
-    
-    # Use -i option to specify security key
-    ssh -i "$SECURITY_KEY_PATH" "$hostname"
+
+    log_warn "External network detected. Using security key authentication."
+    print_warning "External network detected. Connecting with security key authentication..."
+    print_warning "Please touch your YubiKey or security key when prompted."
+    print_info "Target: $hostname (using $SECURITY_KEY_PATH)"
+
+    if [ "$dry_run" = true ]; then
+        if [ ${#ssh_options[@]} -gt 0 ]; then
+            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+        else
+            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH $hostname"
+        fi
+        return 0
+    fi
+
+    if [ ${#ssh_options[@]} -gt 0 ]; then
+        log_debug "Executing: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+        ssh -i "$SECURITY_KEY_PATH" "${ssh_options[@]}" "$hostname"
+    else
+        log_debug "Executing: ssh -i $SECURITY_KEY_PATH $hostname"
+        ssh -i "$SECURITY_KEY_PATH" "$hostname"
+    fi
 }
 
 # Main function
 main() {
     local hostname=""
     local force_security_key=false
-    
+    local dry_run=false
+    local ssh_options=()
+
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             --security-key|-s)
                 force_security_key=true
                 shift
+                ;;
+            --dry-run|-n)
+                dry_run=true
+                shift
+                ;;
+            --init-config)
+                init_config
+                exit $?
                 ;;
             --debug|-d)
                 debug_info
@@ -196,24 +489,37 @@ main() {
                 usage
                 exit 0
                 ;;
+            --)
+                # End of smart-ssh options, rest are SSH options
+                shift
+                ssh_options+=("$@")
+                break
+                ;;
             -*)
-                echo "Unknown option: $1"
-                usage
-                exit 1
+                # Could be SSH option, collect it
+                ssh_options+=("$1")
+                shift
                 ;;
             *)
-                hostname="$1"
-                shift
+                # First non-option argument is hostname
+                if [ -z "$hostname" ]; then
+                    hostname="$1"
+                    shift
+                else
+                    # Additional arguments are SSH options or remote command
+                    ssh_options+=("$1")
+                    shift
+                fi
                 ;;
         esac
     done
-    
+
     if [ -z "$hostname" ]; then
-        echo "Error: Please specify a hostname"
+        print_error "Error: Please specify a hostname"
         usage
         exit 1
     fi
-    
+
     # Check SSH configuration exists
     if ! check_ssh_config "$hostname"; then
         echo ""
@@ -228,46 +534,71 @@ main() {
         echo "      when connecting from external networks."
         exit 1
     fi
-    
+
     # Force security key if requested
     if [ "$force_security_key" = true ]; then
-        echo "Security key authentication forced by --security-key option"
-        ssh_from_away "$hostname"
+        print_warning "Security key authentication forced by --security-key option"
+        ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
         return
     fi
-    
-    echo "Checking local network..."
-    
+
+    log_debug "Checking local network..."
+    print_info "Checking local network..."
+
     CURRENT_IP=$(get_current_ip)
-    
+    log_debug "Current IP: $CURRENT_IP"
+
     if [ "$CURRENT_IP" = "NOT_CONNECTED" ]; then
-        echo "Cannot determine local IP address."
+        log_warn "Cannot determine local IP address"
+        print_warning "Cannot determine local IP address."
+
+        if [ "$dry_run" = true ]; then
+            print_debug "[DRY RUN] Manual selection would be required"
+            print_debug "[DRY RUN] Options:"
+            if [ ${#ssh_options[@]} -gt 0 ]; then
+                print_debug "  1) Regular public key: ssh ${ssh_options[*]} $hostname"
+                print_debug "  2) Security key: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+            else
+                print_debug "  1) Regular public key: ssh $hostname"
+                print_debug "  2) Security key: ssh -i $SECURITY_KEY_PATH $hostname"
+            fi
+            return 0
+        fi
+
         echo "Please manually select SSH connection method:"
         echo "1) Regular public key authentication ($hostname)"
         echo "2) Security key authentication ($hostname using $SECURITY_KEY_PATH)"
         read -p "Choice (1/2): " choice
-        
+
         case $choice in
-            1) ssh_from_home "$hostname" ;;
-            2) ssh_from_away "$hostname" ;;
-            *) echo "Invalid choice."; exit 1 ;;
+            1) ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}" ;;
+            2) ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}" ;;
+            *) print_error "Invalid choice."; exit 1 ;;
         esac
     elif is_home_network "$CURRENT_IP"; then
-        echo "Home network detected: $CURRENT_IP"
-        ssh_from_home "$hostname"
+        print_success "Home network detected: $CURRENT_IP"
+        ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}"
     else
-        echo "External network detected: $CURRENT_IP"
-        ssh_from_away "$hostname"
+        print_warning "External network detected: $CURRENT_IP"
+        ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
     fi
 }
 
 # Show debug information
 debug_info() {
     echo "=== Debug Information ==="
-    echo "Current IP: $(get_current_ip)"
-    echo "Configured home networks: $HOME_NETWORK"
-    echo "Security key path: $SECURITY_KEY_PATH"
-    echo "Security key file exists: $([ -f "$SECURITY_KEY_PATH" ] && echo "Yes" || echo "No")"
+    echo ""
+    echo "Configuration:"
+    echo "  Config file: $CONFIG_FILE"
+    echo "  Config file exists: $([ -f "$CONFIG_FILE" ] && echo "Yes" || echo "No")"
+    echo "  HOME_NETWORK: $HOME_NETWORK"
+    echo "  SECURITY_KEY_PATH: $SECURITY_KEY_PATH"
+    echo "  LOG_LEVEL: $LOG_LEVEL"
+    echo ""
+    echo "Network:"
+    echo "  Current IP: $(get_current_ip)"
+    echo "  Security key file exists: $([ -f "$SECURITY_KEY_PATH" ] && echo "Yes" || echo "No")"
+    echo ""
     echo "Network connection status:"
     
     # Show platform-specific network info
