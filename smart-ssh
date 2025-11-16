@@ -84,7 +84,8 @@ LOG_LEVEL_ERROR=3
 
 # Convert log level string to number
 get_log_level_number() {
-    case "${LOG_LEVEL,,}" in
+    local level_lower=$(echo "$LOG_LEVEL" | tr '[:upper:]' '[:lower:]')
+    case "$level_lower" in
         debug) echo $LOG_LEVEL_DEBUG ;;
         info) echo $LOG_LEVEL_INFO ;;
         warn) echo $LOG_LEVEL_WARN ;;
@@ -94,6 +95,8 @@ get_log_level_number() {
 }
 
 CURRENT_LOG_LEVEL=$(get_log_level_number)
+# Ensure CURRENT_LOG_LEVEL is set (default to INFO if empty)
+CURRENT_LOG_LEVEL=${CURRENT_LOG_LEVEL:-$LOG_LEVEL_INFO}
 
 # Print functions for colored output
 print_error() {
