@@ -10,6 +10,9 @@ A local network-based SSH connection tool that automatically chooses between reg
 - ⚙️ **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
 - 📦 **Multiple servers**: Support for multiple servers with consistent naming patterns
 - 🛡️ **IP-based detection**: Network-based detection for reliable home/away identification
+- 🎨 **Color output**: Enhanced visibility with color-coded messages (respects `NO_COLOR`)
+- 🧪 **Dry-run mode**: Preview authentication method without connecting
+- ✅ **Input validation**: Robust error handling for IP addresses and CIDR formats
 
 ## Security Model
 
@@ -134,11 +137,18 @@ smart-ssh production
 smart-ssh --security-key bastion
 smart-ssh -s web-server
 
+# Dry-run mode (preview what would be executed without connecting)
+smart-ssh --dry-run production
+smart-ssh -n staging
+
 # Use different security key temporarily
 SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key dev-server
 
-# Override home networks temporarily  
+# Override home networks temporarily
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh staging
+
+# Disable color output
+NO_COLOR=1 smart-ssh production
 
 # Debug mode
 smart-ssh --debug
