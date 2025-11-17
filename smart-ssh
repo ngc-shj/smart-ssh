@@ -446,21 +446,35 @@ ssh_from_away() {
     print_warning "Please touch your YubiKey or security key when prompted."
     print_info "Target: $hostname (using $SECURITY_KEY_PATH)"
 
+    # Create temporary SSH config that only uses the security key
+    local temp_config
+    temp_config=$(mktemp)
+    trap "rm -f $temp_config" RETURN
+
+    # Get original SSH config but replace IdentityFile and IdentityAgent
+    ssh -G "$hostname" 2>/dev/null | \
+        grep -v "^identityfile " | \
+        grep -v "^identityagent " | \
+        awk '{print $1" "$2}' > "$temp_config"
+    echo "IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
+    echo "IdentitiesOnly yes" >> "$temp_config"
+    echo "IdentityAgent none" >> "$temp_config"
+
     if [ "$dry_run" = true ]; then
         if [ ${#ssh_options[@]} -gt 0 ]; then
-            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
+            print_debug "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
         else
-            print_debug "[DRY RUN] Would execute: ssh -i $SECURITY_KEY_PATH $hostname"
+            print_debug "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
         fi
         return 0
     fi
 
     if [ ${#ssh_options[@]} -gt 0 ]; then
-        log_debug "Executing: ssh -i $SECURITY_KEY_PATH ${ssh_options[*]} $hostname"
-        ssh -i "$SECURITY_KEY_PATH" "${ssh_options[@]}" "$hostname"
+        log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
+        ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
     else
-        log_debug "Executing: ssh -i $SECURITY_KEY_PATH $hostname"
-        ssh -i "$SECURITY_KEY_PATH" "$hostname"
+        log_debug "Executing: ssh -F $temp_config $hostname"
+        ssh -F "$temp_config" "$hostname"
     fi
 }
 
