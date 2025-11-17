@@ -84,13 +84,37 @@ _smart-ssh() {
         fi
     done
 
-    # After hostname or --, allow SSH options
-    if [[ $hostname_seen -eq 1 ]] || [[ ${words[(I)--]} -gt 0 ]]; then
+    # Check if we've seen -- separator
+    local separator_idx=${words[(I)--]}
+
+    if [[ $separator_idx -gt 0 ]]; then
+        # After --, handle SSH options manually
+        local prev="${words[CURRENT-1]}"
+        local cur="${words[CURRENT]}"
+
+        # If previous word was -i or -F, complete files
+        if [[ "$prev" == "-i" ]] || [[ "$prev" == "-F" ]]; then
+            _files
+            return 0
+        fi
+
+        # If current word starts with -, suggest SSH options
+        if [[ "$cur" == -* ]]; then
+            local -a ssh_opts
+            ssh_opts=(-v -p -L -R -D -i -o -F -J -W -N -T -f -q -4 -6)
+            _describe 'ssh options' ssh_opts
+            return 0
+        fi
+
+        # Otherwise, complete hostname
+        compadd -a hosts
+        return 0
+    elif [[ $hostname_seen -eq 1 ]]; then
+        # After hostname, allow both smart-ssh and SSH options
         _arguments -s -S \
             $options \
             $ssh_options \
             '1:hostname:compadd -a hosts' \
-            '*::ssh args:' \
             && return 0
     else
         # Before hostname, only smart-ssh options

@@ -70,6 +70,12 @@ _smart_ssh_completion() {
 
     # If we've seen --, only complete SSH options or hostnames
     if [[ $seen_separator -eq 1 ]]; then
+        # Check if previous word needs file completion
+        if [[ "$prev" == "-i" ]] || [[ "$prev" == "-F" ]]; then
+            COMPREPLY=( $(compgen -f -- ${cur}) )
+            return 0
+        fi
+
         if [[ ${cur} == -* ]]; then
             COMPREPLY=( $(compgen -W "${ssh_opts}" -- ${cur}) )
             return 0
