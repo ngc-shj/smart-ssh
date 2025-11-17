@@ -98,8 +98,13 @@ _smart_ssh_completion() {
             # These don't take arguments
             return 0
             ;;
-        -p|-L|-R|-D|-i|-o|-F|-J|-W)
-            # SSH options that take arguments - don't complete
+        -i|-F)
+            # SSH options that take file paths - complete files
+            COMPREPLY=( $(compgen -f -- ${cur}) )
+            return 0
+            ;;
+        -p|-L|-R|-D|-o|-J|-W)
+            # SSH options that take other arguments - don't complete
             return 0
             ;;
     esac
