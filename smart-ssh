@@ -187,7 +187,7 @@ usage() {
 init_config() {
     if [ -f "$CONFIG_FILE" ]; then
         print_warning "Configuration file already exists: $CONFIG_FILE"
-        read -p "Overwrite? (y/N): " confirm
+        read -rp "Overwrite? (y/N): " confirm
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             echo "Cancelled."
             return 1
@@ -449,7 +449,7 @@ ssh_from_away() {
     # Create temporary SSH config that only uses the security key
     local temp_config
     temp_config=$(mktemp)
-    trap "rm -f $temp_config" RETURN
+    trap 'rm -f "$temp_config"' RETURN
 
     # Get original SSH config but replace IdentityFile and IdentityAgent
     ssh -G "$hostname" 2>/dev/null | \
@@ -587,7 +587,7 @@ main() {
         echo "Please manually select SSH connection method:"
         echo "1) Regular public key authentication ($hostname)"
         echo "2) Security key authentication ($hostname using $SECURITY_KEY_PATH)"
-        read -p "Choice (1/2): " choice
+        read -rp "Choice (1/2): " choice
 
         case $choice in
             1) ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}" ;;
