@@ -451,21 +451,98 @@ ssh_from_away() {
     temp_config=$(mktemp)
     trap 'rm -f "$temp_config"' RETURN
 
-    # Get original SSH config but replace IdentityFile and IdentityAgent
-    ssh -G "$hostname" 2>/dev/null | \
-        grep -v "^identityfile " | \
-        grep -v "^identityagent " | \
-        awk '{print $1" "$2}' > "$temp_config"
-    echo "IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
-    echo "IdentitiesOnly yes" >> "$temp_config"
-    echo "IdentityAgent none" >> "$temp_config"
+    # Check if ProxyJump is configured
+    local proxy_jump
+    proxy_jump=$(ssh -G "$hostname" 2>/dev/null | grep "^proxyjump " | awk '{print $2}')
+
+    # If ProxyJump is configured, add the proxy host configuration first
+    if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
+        log_debug "ProxyJump detected: $proxy_jump"
+        # Add proxy host configuration with security key
+        echo "Host $proxy_jump" >> "$temp_config"
+        ssh -G "$proxy_jump" 2>/dev/null | \
+            grep -v "^identityfile " | \
+            grep -v "^identityagent " | \
+            grep -E "^(hostname|port|user) " | \
+            awk '{print "    " $1 " " $2}' >> "$temp_config"
+        echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+        echo "" >> "$temp_config"
+
+        # Add target host configuration (keep original IdentityFile for final destination)
+        echo "Host $hostname" >> "$temp_config"
+        ssh -G "$hostname" 2>/dev/null | \
+            grep -v "^identityagent " | \
+            grep -E "^(hostname|port|user|proxyjump|localforward|identityfile) " | \
+            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+    else
+        # No ProxyJump - direct connection with security key
+        # Check if hostname references another Host alias
+        local target_hostname
+        target_hostname=$(ssh -G "$hostname" 2>/dev/null | grep "^hostname " | awk '{print $2}')
+
+        # If target_hostname is a Host alias (not a FQDN/IP), resolve it
+        local is_alias=false
+        if [ -n "$target_hostname" ] && [ "$target_hostname" != "$hostname" ]; then
+            local alias_hostname
+            alias_hostname=$(ssh -G "$target_hostname" 2>/dev/null | grep "^hostname " | awk '{print $2}')
+            # Check if the alias resolves to a different hostname (meaning it's a Host entry)
+            if [ -n "$alias_hostname" ] && [ "$alias_hostname" != "$target_hostname" ]; then
+                log_debug "HostName alias detected: $target_hostname -> $alias_hostname"
+                is_alias=true
+                # Add the alias host configuration
+                echo "Host $target_hostname" >> "$temp_config"
+                ssh -G "$target_hostname" 2>/dev/null | \
+                    grep -v "^identityfile " | \
+                    grep -v "^identityagent " | \
+                    grep -E "^(hostname|port|user) " | \
+                    awk '{print "    " $1 " " $2}' >> "$temp_config"
+                echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
+                echo "    IdentitiesOnly yes" >> "$temp_config"
+                echo "    IdentityAgent none" >> "$temp_config"
+                echo "" >> "$temp_config"
+            fi
+        fi
+
+        echo "Host $hostname" >> "$temp_config"
+        if [ "$is_alias" = true ]; then
+            # Use settings from the alias host, plus localforward from original
+            # Use the resolved hostname (FQDN/IP), not the alias
+            echo "    hostname $alias_hostname" >> "$temp_config"
+            ssh -G "$target_hostname" 2>/dev/null | \
+                grep -v "^identityfile " | \
+                grep -v "^identityagent " | \
+                grep -v "^hostname " | \
+                grep -E "^(port|user) " | \
+                awk '{print "    " $1 " " $2}' >> "$temp_config"
+            # Add localforward from original config
+            ssh -G "$hostname" 2>/dev/null | \
+                grep -E "^localforward " | \
+                awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        else
+            ssh -G "$hostname" 2>/dev/null | \
+                grep -v "^identityfile " | \
+                grep -v "^identityagent " | \
+                grep -E "^(hostname|port|user|localforward) " | \
+                awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        fi
+        echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+    fi
 
     if [ "$dry_run" = true ]; then
         if [ ${#ssh_options[@]} -gt 0 ]; then
-            print_debug "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
+            print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
         else
-            print_debug "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
+            print_info "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
         fi
+        print_info "[DRY RUN] Temporary SSH config:"
+        while IFS= read -r line; do
+            print_info "  $line"
+        done < "$temp_config"
         return 0
     fi
 
