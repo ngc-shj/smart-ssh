@@ -2,25 +2,28 @@
 
 A local network-based SSH connection tool that automatically chooses between regular public key authentication (from home networks) and security key authentication (from external networks).
 
+English | [日本語](README.ja.md)
+
 ## Features
 
-- 🏠 **Home detection**: Uses regular SSH keys when connected to trusted home networks
-- 🔐 **Away mode**: Requires security key (FIDO2/WebAuthn) authentication from external networks
-- 🌐 **Cross-platform**: Works on Linux, macOS, and WSL2
-- ⚙️ **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
-- 📦 **Multiple servers**: Support for multiple servers with consistent naming patterns
-- 🛡️ **IP-based detection**: Network-based detection for reliable home/away identification
-- 🎨 **Color output**: Enhanced visibility with color-coded messages (respects `NO_COLOR`)
-- 🧪 **Dry-run mode**: Preview authentication method without connecting
-- ✅ **Input validation**: Robust error handling for IP addresses and CIDR formats
-- ⚙️ **Configuration file**: XDG-compliant config file support with flexible priority system
-- 🔧 **Tab completion**: Bash and Zsh completion for hostnames and options
-- 🧪 **Testing**: Comprehensive test suite with bats
-- 🔀 **SSH option pass-through**: Forward any SSH options (-v, -p, -L, etc.) to the underlying ssh command
+- **Home detection**: Uses regular SSH keys when connected to trusted home networks
+- **Away mode**: Requires security key (FIDO2/WebAuthn) authentication from external networks
+- **Cross-platform**: Works on Linux, macOS, and WSL2
+- **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
+- **Multiple home networks**: Support for multiple home locations with different identifiers
+- **Gateway MAC detection**: Identify home networks by router MAC address (no special permissions required)
+- **IP-based fallback**: Network-based detection when MAC detection is not available
+- **Color output**: Enhanced visibility with color-coded messages (respects `NO_COLOR`)
+- **Dry-run mode**: Preview authentication method without connecting
+- **Input validation**: Robust error handling for IP addresses and CIDR formats
+- **Configuration file**: XDG-compliant config file support with flexible priority system
+- **Tab completion**: Bash and Zsh completion for hostnames and options
+- **Testing**: Comprehensive test suite with bats
+- **SSH option pass-through**: Forward any SSH options (-v, -p, -L, etc.) to the underlying ssh command
 
 ## Security Model
 
-- **Home networks**: Convenient access with regular public key authentication from trusted IP ranges
+- **Home networks**: Convenient access with regular public key authentication from trusted networks
 - **External networks**: Enhanced security with mandatory security key (YubiKey, etc.) authentication from untrusted networks
 - **Server-side enforcement**: Actual security is enforced server-side based on source IP
 
@@ -97,7 +100,11 @@ vi ~/.config/smart-ssh/config
 Configuration file format (`~/.config/smart-ssh/config`):
 
 ```bash
-# Home networks (comma-separated CIDR ranges)
+# Home gateway MAC addresses (comma-separated, preferred detection method)
+# Use 'smart-ssh --debug' to find your gateway MAC address
+HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff,11:22:33:44:55:66
+
+# Home networks (comma-separated CIDR ranges, fallback detection method)
 HOME_NETWORK=192.168.1.0/24,10.0.0.0/24
 
 # Security key path
@@ -112,7 +119,13 @@ LOG_LEVEL=info
 Override settings temporarily using environment variables:
 
 ```bash
-# Single network
+# Gateway MAC (preferred method)
+export HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
+
+# Multiple gateway MACs for multiple home networks
+export HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff,11:22:33:44:55:66"
+
+# IP-based fallback
 export HOME_NETWORK="192.168.1.0/24"
 
 # Multiple networks (comma-separated)
@@ -122,6 +135,7 @@ export HOME_NETWORK="192.168.1.0/24,10.0.0.0/24,172.16.0.0/12"
 export SECURITY_KEY_PATH="$HOME/.ssh/id_ecdsa_sk"
 
 # Per-command override
+HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff" smart-ssh hostname
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh hostname
 ```
 
@@ -200,6 +214,9 @@ sudo systemctl reload sshd  # Apply changes
 # First-time setup: Create configuration file
 smart-ssh --init-config
 
+# Show configuration and network info (gateway MAC, IP, etc.)
+smart-ssh --debug
+
 # Connect to a server (automatically detects home/away)
 smart-ssh production
 
@@ -229,7 +246,8 @@ smart-ssh -n staging
 # Use different security key temporarily
 SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk smart-ssh --security-key dev-server
 
-# Override home networks temporarily
+# Override home network detection temporarily
+HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff" smart-ssh staging
 HOME_NETWORK="192.168.1.0/24,10.0.0.0/8" smart-ssh staging
 
 # Disable color output
@@ -242,24 +260,48 @@ smart-ssh --debug
 smart-ssh --help
 ```
 
+## Network Detection Methods
+
+smart-ssh uses the following detection methods in priority order:
+
+| Priority | Method      | Description                                        |
+|----------|-------------|----------------------------------------------------|
+| 1        | Gateway MAC | Router MAC address via ARP (no permissions needed) |
+| 2        | IP Address  | CIDR range matching (fallback)                     |
+
+### Gateway MAC Detection (Recommended)
+
+Gateway MAC detection identifies your home network by the MAC address of your router. This method:
+
+- Works without any special permissions
+- Is reliable across different IP configurations
+- Supports multiple home networks
+
+To find your gateway MAC address:
+
+```bash
+smart-ssh --debug
+# Look for "Gateway MAC: xx:xx:xx:xx:xx:xx"
+```
+
 ## Platform Support
 
-| Platform | IP Detection Method |
-|----------|---------------------|
-| WSL2     | PowerShell `Get-NetIPAddress` |
-| Linux    | `ip route` or `ifconfig` |
-| macOS    | `route get default` + `ifconfig` |
+| Platform | Gateway MAC         | IP Detection                     |
+|----------|---------------------|----------------------------------|
+| macOS    | `arp -n`            | `route get default` + `ifconfig` |
+| Linux    | `ip neigh` or `arp` | `ip route` or `ifconfig`         |
+| WSL2     | N/A                 | PowerShell `Get-NetIPAddress`    |
 
 ## Example Workflow
 
-1. **At home (192.168.1.x)**: Connects using regular SSH key (no touch required)
-2. **At coffee shop (different IP range)**: Connects using security key (YubiKey touch required)
+1. **At home (gateway MAC matches)**: Connects using regular SSH key (no touch required)
+2. **At coffee shop (different gateway)**: Connects using security key (YubiKey touch required)
 3. **Force security key**: Use `--security-key` option to always use security key
 4. **Unknown network**: Prompts user to manually choose authentication method
 
 ### Real-world scenarios:
 - `smart-ssh production` - Deploy to production server
-- `smart-ssh dev-server` - Connect to development environment  
+- `smart-ssh dev-server` - Connect to development environment
 - `smart-ssh bastion` - Access jump host for internal network
 - `smart-ssh web-server` - Manage web server
 
@@ -268,7 +310,7 @@ smart-ssh --help
 - **Convenience at home**: No need to touch security key for routine access from trusted networks
 - **Strong security away**: Mandatory hardware authentication prevents key theft attacks from external networks
 - **Algorithm enforcement**: Server-side algorithm restrictions prevent weak key attacks
-- **Network-based detection**: IP-based detection is more reliable than other methods
+- **Network-based detection**: Gateway MAC and IP-based detection for reliable identification
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
 
@@ -314,6 +356,28 @@ source ~/.zshrc
 - Complete all command-line options
 - Works with combined options (e.g., `-s hostname`)
 - Context-aware completion: smart-ssh options before hostname, SSH options after
+
+### Using as SSH Alias
+
+You can use `smart-ssh` as a drop-in replacement for `ssh`:
+
+```bash
+# Bash (~/.bashrc)
+if command -v smart-ssh >/dev/null 2>&1; then
+    alias ssh='smart-ssh'
+    # Enable completion for the alias
+    complete -F _smart_ssh_completion ssh
+fi
+
+# Zsh (~/.zshrc)
+if (( $+commands[smart-ssh] )); then
+    alias ssh='smart-ssh'
+    # Enable completion for the alias
+    compdef _smart-ssh ssh
+fi
+```
+
+Note: You must first install the tab completion scripts as described above, then add the alias configuration to your shell rc file.
 
 ## Testing
 
@@ -364,46 +428,49 @@ bats -f "validate IP" tests/test_smart_ssh.bats
 
 ### Network Detection Issues
 
-**Problem**: smart-ssh cannot detect my IP address
+**Problem**: smart-ssh cannot detect my network
 
 **Solutions**:
 
-1. Check your network connection:
-   ```bash
-   # macOS
-   ifconfig | grep "inet "
-
-   # Linux
-   ip addr show
-
-   # WSL2
-   powershell.exe -Command "Get-NetIPAddress -AddressFamily IPv4"
-   ```
-
-2. Use debug mode to see what's happening:
+1. Use debug mode to see what's happening:
    ```bash
    smart-ssh --debug
    ```
 
-3. Manually specify your authentication method when prompted
+2. Check gateway MAC and IP:
+   ```bash
+   # macOS
+   route -n get default
+   arp -n $(route -n get default | grep gateway | awk '{print $2}')
+
+   # Linux
+   ip route show default
+   ip neigh show $(ip route show default | awk '/default/ {print $3}')
+   ```
+
+3. Configure HOME_GATEWAY_MAC with your router's MAC address:
+   ```bash
+   # In config file
+   HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff
+   ```
 
 **Problem**: Home network not detected even though I'm at home
 
 **Solutions**:
 
-1. Verify your current IP address is in the configured CIDR range:
+1. Verify your gateway MAC or IP matches the configuration:
    ```bash
    smart-ssh --debug
-   # Check "Current IP" vs "HOME_NETWORK"
+   # Check "Gateway MAC" and "Current IP" vs configured values
    ```
 
-2. Update your HOME_NETWORK configuration:
+2. Update your configuration:
    ```bash
    # Edit config file
    vi ~/.config/smart-ssh/config
 
    # Or use environment variable
-   export HOME_NETWORK="192.168.1.0/24,10.0.0.0/8"
+   export HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
    ```
 
 ### Security Key Issues
@@ -484,10 +551,10 @@ bats -f "validate IP" tests/test_smart_ssh.bats
 2. Check file syntax (no spaces around `=`):
    ```bash
    # Correct
-   HOME_NETWORK=192.168.1.0/24
+   HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff
 
    # Incorrect
-   HOME_NETWORK = 192.168.1.0/24
+   HOME_GATEWAY_MAC = aa:bb:cc:dd:ee:ff
    ```
 
 3. Recreate config file:
@@ -551,7 +618,7 @@ LOG_LEVEL=debug smart-ssh production
 
 2. Test with environment variable override:
    ```bash
-   HOME_NETWORK="192.168.1.0/24" smart-ssh --dry-run production
+   HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff" smart-ssh --dry-run production
    ```
 
 3. Report issues at: <https://github.com/ngc-shj/smart-ssh/issues>
