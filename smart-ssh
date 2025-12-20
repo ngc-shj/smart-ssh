@@ -398,7 +398,6 @@ ssh_from_home() {
     shift 2
     local ssh_options=("$@")
 
-    log_info "Home network connection detected. Connecting with regular public key authentication..."
     print_success "Home network connection detected. Connecting with regular public key authentication..."
     print_info "Target: $hostname"
 
@@ -429,7 +428,6 @@ ssh_from_away() {
 
     # Check if security key file exists
     if [ ! -f "$SECURITY_KEY_PATH" ]; then
-        log_error "Security key file not found: $SECURITY_KEY_PATH"
         print_error "Error: Security key file not found: $SECURITY_KEY_PATH"
         echo ""
         echo "Please generate a security key first:"
@@ -441,7 +439,6 @@ ssh_from_away() {
         exit 1
     fi
 
-    log_warn "External network detected. Using security key authentication."
     print_warning "External network detected. Connecting with security key authentication..."
     print_warning "Please touch your YubiKey or security key when prompted."
     print_info "Target: $hostname (using $SECURITY_KEY_PATH)"
@@ -638,14 +635,12 @@ main() {
         return
     fi
 
-    log_debug "Checking local network..."
     print_info "Checking local network..."
 
     CURRENT_IP=$(get_current_ip)
     log_debug "Current IP: $CURRENT_IP"
 
     if [ "$CURRENT_IP" = "NOT_CONNECTED" ]; then
-        log_warn "Cannot determine local IP address"
         print_warning "Cannot determine local IP address."
 
         if [ "$dry_run" = true ]; then
