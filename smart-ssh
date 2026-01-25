@@ -560,7 +560,7 @@ ssh_from_away() {
         echo "Host $hostname" >> "$temp_config"
         ssh -G "$hostname" 2>/dev/null | \
             grep -v "^identityagent " | \
-            grep -E "^(hostname|port|user|proxyjump|localforward|identityfile) " | \
+            grep -E "^(hostname|port|user|proxyjump|localforward|identityfile|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
             awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
         echo "    IdentitiesOnly yes" >> "$temp_config"
     else
@@ -603,15 +603,15 @@ ssh_from_away() {
                 grep -v "^hostname " | \
                 grep -E "^(port|user) " | \
                 awk '{print "    " $1 " " $2}' >> "$temp_config"
-            # Add localforward from original config
+            # Add localforward and tunnel options from original config
             ssh -G "$hostname" 2>/dev/null | \
-                grep -E "^localforward " | \
+                grep -E "^(localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
                 awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
         else
             ssh -G "$hostname" 2>/dev/null | \
                 grep -v "^identityfile " | \
                 grep -v "^identityagent " | \
-                grep -E "^(hostname|port|user|localforward) " | \
+                grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
                 awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
         fi
         echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
