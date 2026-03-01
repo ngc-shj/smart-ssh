@@ -13,6 +13,7 @@ CONFIG_FILE="$CONFIG_DIR/config"
 DEFAULT_HOME_NETWORK="192.168.1.0/24"
 DEFAULT_HOME_GATEWAY_MAC=""
 DEFAULT_SECURITY_KEY_PATH="$HOME/.ssh/id_ed25519_sk"
+DEFAULT_TAILSCALE_AS_HOME="true"
 DEFAULT_LOG_LEVEL="info"
 
 # Load configuration from file if it exists
@@ -44,6 +45,9 @@ load_config() {
                 SECURITY_KEY_PATH)
                     CONFIG_SECURITY_KEY_PATH="$value"
                     ;;
+                TAILSCALE_AS_HOME)
+                    CONFIG_TAILSCALE_AS_HOME="$value"
+                    ;;
                 LOG_LEVEL)
                     CONFIG_LOG_LEVEL="$value"
                     ;;
@@ -60,6 +64,8 @@ load_config
 HOME_NETWORK="${HOME_NETWORK:-${CONFIG_HOME_NETWORK:-$DEFAULT_HOME_NETWORK}}"
 # Home gateway MAC addresses (can be overridden by environment variable, comma-separated)
 HOME_GATEWAY_MAC="${HOME_GATEWAY_MAC:-${CONFIG_HOME_GATEWAY_MAC:-$DEFAULT_HOME_GATEWAY_MAC}}"
+# Treat Tailscale hosts as home network (can be overridden by environment variable)
+TAILSCALE_AS_HOME="${TAILSCALE_AS_HOME:-${CONFIG_TAILSCALE_AS_HOME:-$DEFAULT_TAILSCALE_AS_HOME}}"
 # Security key path (can be overridden by environment variable)
 SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-${CONFIG_SECURITY_KEY_PATH:-$DEFAULT_SECURITY_KEY_PATH}}"
 # Expand ~ in SECURITY_KEY_PATH
@@ -209,6 +215,12 @@ init_config() {
 # smart-ssh configuration file
 # This file follows the format: KEY=value
 # Lines starting with # are comments
+
+# Treat Tailscale hosts as home network (true/false)
+# When enabled, connections to Tailscale nodes (100.64.0.0/10, *.ts.net)
+# are treated as home network and use regular public key authentication
+# Default: true
+TAILSCALE_AS_HOME=true
 
 # Home gateway MAC addresses (comma-separated, preferred detection method)
 # Use 'smart-ssh --debug' to find your gateway MAC address
@@ -464,6 +476,78 @@ is_home_network() {
             return 0
         fi
     done
+    return 1
+}
+
+# Resolve hostname to IP address using available DNS tools
+# Try each tool in sequence until one succeeds, since some tools
+# (e.g., dig) bypass the system resolver and may miss Tailscale MagicDNS
+resolve_hostname() {
+    local hostname="$1"
+    local resolved_ip=""
+
+    # host uses system resolver (works with Tailscale MagicDNS)
+    if [ -z "$resolved_ip" ] && command -v host >/dev/null 2>&1; then
+        resolved_ip=$(host -t A "$hostname" 2>/dev/null | awk '/has address/ {print $4}' | head -1)
+    fi
+
+    # dig may bypass system resolver, but try as fallback
+    if [ -z "$resolved_ip" ] && command -v dig >/dev/null 2>&1; then
+        resolved_ip=$(dig +short "$hostname" A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+    fi
+
+    # getent uses system resolver (NSS)
+    if [ -z "$resolved_ip" ] && command -v getent >/dev/null 2>&1; then
+        resolved_ip=$(getent hosts "$hostname" 2>/dev/null | awk '{print $1}' | head -1)
+    fi
+
+    if [ -n "$resolved_ip" ]; then
+        echo "$resolved_ip"
+        return 0
+    fi
+    return 1
+}
+
+# Check if the SSH target host is a Tailscale node
+# Tailscale uses CGNAT range 100.64.0.0/10 and MagicDNS *.ts.net
+is_tailscale_host() {
+    local hostname="$1"
+
+    # Get resolved HostName from SSH config
+    local resolved_host
+    resolved_host=$(ssh -G "$hostname" 2>/dev/null | awk '/^hostname / {print $2}')
+
+    if [ -z "$resolved_host" ]; then
+        return 1
+    fi
+
+    log_debug "Tailscale check: resolved HostName=$resolved_host"
+
+    # Check if HostName is a Tailscale MagicDNS name (*.ts.net)
+    if [[ "$resolved_host" == *.ts.net ]]; then
+        log_debug "Tailscale detected: MagicDNS hostname ($resolved_host)"
+        return 0
+    fi
+
+    # Check if HostName is an IP in Tailscale CGNAT range (100.64.0.0/10)
+    if validate_ip "$resolved_host"; then
+        if ip_in_cidr "$resolved_host" "100.64.0.0/10"; then
+            log_debug "Tailscale detected: CGNAT IP ($resolved_host)"
+            return 0
+        fi
+        return 1
+    fi
+
+    # HostName is a non-ts.net hostname; try DNS resolution
+    local resolved_ip
+    resolved_ip=$(resolve_hostname "$resolved_host")
+    if [ -n "$resolved_ip" ] && validate_ip "$resolved_ip"; then
+        if ip_in_cidr "$resolved_ip" "100.64.0.0/10"; then
+            log_debug "Tailscale detected: DNS resolved to CGNAT IP ($resolved_host -> $resolved_ip)"
+            return 0
+        fi
+    fi
+
     return 1
 }
 
@@ -726,13 +810,24 @@ main() {
 
     print_info "Checking local network..."
 
-    # Detection priority: Gateway MAC > IP address
+    # Detection priority: Tailscale (destination) > Gateway MAC > IP address
     local is_home=false
     local detection_method=""
     local detected_value=""
 
-    # Try Gateway MAC detection first (if configured)
-    if [ -n "$HOME_GATEWAY_MAC" ]; then
+    # Try Tailscale destination detection first (if enabled)
+    if [ "$TAILSCALE_AS_HOME" = "true" ]; then
+        if is_tailscale_host "$hostname"; then
+            is_home=true
+            detection_method="Tailscale"
+            local ts_host
+            ts_host=$(ssh -G "$hostname" 2>/dev/null | awk '/^hostname / {print $2}')
+            detected_value="$ts_host"
+        fi
+    fi
+
+    # Try Gateway MAC detection (if configured and not already detected)
+    if [ -z "$detection_method" ] && [ -n "$HOME_GATEWAY_MAC" ]; then
         local current_mac
         current_mac=$(get_gateway_mac)
         if [ -n "$current_mac" ]; then
@@ -808,6 +903,7 @@ debug_info() {
     echo "Configuration:"
     echo "  Config file: $CONFIG_FILE"
     echo "  Config file exists: $([ -f "$CONFIG_FILE" ] && echo "Yes" || echo "No")"
+    echo "  TAILSCALE_AS_HOME: $TAILSCALE_AS_HOME"
     echo "  HOME_GATEWAY_MAC: ${HOME_GATEWAY_MAC:-<not configured>}"
     echo "  HOME_NETWORK: $HOME_NETWORK"
     echo "  SECURITY_KEY_PATH: $SECURITY_KEY_PATH"

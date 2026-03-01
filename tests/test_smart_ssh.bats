@@ -196,3 +196,58 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "LOG_LEVEL: debug" ]]
 }
+
+# Test: Tailscale CGNAT IP range detection
+@test "Tailscale CGNAT IP range (100.64.0.0/10) is detected" {
+    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
+    source <(sed -n '/^print_error()/,/^}/p' "$SMART_SSH")
+    source <(sed -n '/^validate_cidr()/,/^}/p' "$SMART_SSH")
+    source <(sed -n '/^ip_to_int()/,/^}/p' "$SMART_SSH")
+    source <(sed -n '/^ip_in_cidr()/,/^}/p' "$SMART_SSH")
+    export COLOR_RED='' COLOR_RESET=''
+
+    # Tailscale IPs (100.64.0.0/10 = 100.64.0.0 - 100.127.255.255)
+    run ip_in_cidr "100.100.1.1" "100.64.0.0/10"
+    [ "$status" -eq 0 ]
+
+    run ip_in_cidr "100.64.0.1" "100.64.0.0/10"
+    [ "$status" -eq 0 ]
+
+    run ip_in_cidr "100.127.255.254" "100.64.0.0/10"
+    [ "$status" -eq 0 ]
+
+    # Non-Tailscale IPs
+    run ip_in_cidr "192.168.1.1" "100.64.0.0/10"
+    [ "$status" -eq 1 ]
+
+    run ip_in_cidr "100.128.0.1" "100.64.0.0/10"
+    [ "$status" -eq 1 ]
+
+    run ip_in_cidr "10.0.0.1" "100.64.0.0/10"
+    [ "$status" -eq 1 ]
+}
+
+# Test: TAILSCALE_AS_HOME shown in debug output
+@test "debug output shows TAILSCALE_AS_HOME setting" {
+    export TAILSCALE_AS_HOME="true"
+
+    run "$SMART_SSH" --debug
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "TAILSCALE_AS_HOME: true" ]]
+}
+
+# Test: TAILSCALE_AS_HOME can be disabled
+@test "TAILSCALE_AS_HOME can be set to false" {
+    export TAILSCALE_AS_HOME="false"
+
+    run "$SMART_SSH" --debug
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "TAILSCALE_AS_HOME: false" ]]
+}
+
+# Test: Config file contains TAILSCALE_AS_HOME
+@test "config file contains TAILSCALE_AS_HOME key" {
+    "$SMART_SSH" --init-config > /dev/null 2>&1
+    [ -f "$CONFIG_FILE" ]
+    grep -q "TAILSCALE_AS_HOME=" "$CONFIG_FILE"
+}

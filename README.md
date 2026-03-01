@@ -100,6 +100,10 @@ vi ~/.config/smart-ssh/config
 Configuration file format (`~/.config/smart-ssh/config`):
 
 ```bash
+# Treat Tailscale hosts as home network (true/false)
+# Connections to Tailscale nodes (100.64.0.0/10, *.ts.net) use regular public key auth
+TAILSCALE_AS_HOME=true
+
 # Home gateway MAC addresses (comma-separated, preferred detection method)
 # Use 'smart-ssh --debug' to find your gateway MAC address
 HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff,11:22:33:44:55:66
@@ -119,6 +123,9 @@ LOG_LEVEL=info
 Override settings temporarily using environment variables:
 
 ```bash
+# Disable Tailscale home network detection
+export TAILSCALE_AS_HOME="false"
+
 # Gateway MAC (preferred method)
 export HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
 
@@ -264,10 +271,19 @@ smart-ssh --help
 
 smart-ssh uses the following detection methods in priority order:
 
-| Priority | Method      | Description                                        |
-|----------|-------------|----------------------------------------------------|
-| 1        | Gateway MAC | Router MAC address via ARP (no permissions needed) |
-| 2        | IP Address  | CIDR range matching (fallback)                     |
+| Priority | Method      | Description                                                      |
+|----------|-------------|------------------------------------------------------------------|
+| 1        | Tailscale   | Destination host in Tailscale CGNAT range or MagicDNS (*.ts.net) |
+| 2        | Gateway MAC | Router MAC address via ARP (no permissions needed)               |
+| 3        | IP Address  | CIDR range matching (fallback)                                   |
+
+### Tailscale Detection
+
+When `TAILSCALE_AS_HOME=true` (default), connections to Tailscale nodes are automatically treated as home network. Detection checks the SSH target's resolved hostname for:
+
+- IP addresses in the Tailscale CGNAT range (`100.64.0.0/10`)
+- MagicDNS hostnames (`*.ts.net`)
+- DNS-resolved IPs in the CGNAT range
 
 ### Gateway MAC Detection (Recommended)
 
@@ -294,10 +310,11 @@ smart-ssh --debug
 
 ## Example Workflow
 
-1. **At home (gateway MAC matches)**: Connects using regular SSH key (no touch required)
-2. **At coffee shop (different gateway)**: Connects using security key (YubiKey touch required)
-3. **Force security key**: Use `--security-key` option to always use security key
-4. **Unknown network**: Prompts user to manually choose authentication method
+1. **Tailscale host**: Connects using regular SSH key (no touch required)
+2. **At home (gateway MAC matches)**: Connects using regular SSH key (no touch required)
+3. **At coffee shop (different gateway)**: Connects using security key (YubiKey touch required)
+4. **Force security key**: Use `--security-key` option to always use security key
+5. **Unknown network**: Prompts user to manually choose authentication method
 
 ### Real-world scenarios:
 - `smart-ssh production` - Deploy to production server
