@@ -800,14 +800,24 @@ oidc_poll_token() {
 
         # Do NOT use --fail here: RFC 8628 returns HTTP 400 for
         # authorization_pending/slow_down which are expected responses
+        # Write POST body to temp file to avoid cmdline exposure of client_secret
+        local poll_data_file
+        poll_data_file=$(umask 077 && mktemp)
+        {
+            printf 'grant_type=%s' "urn:ietf:params:oauth:grant-type:device_code"
+            printf '&device_code=%s' "${_OIDC_DEVICE_CODE}"
+            printf '&client_id=%s' "${OIDC_CLIENT_ID}"
+            if [ -n "$OIDC_CLIENT_SECRET" ]; then
+                printf '&client_secret=%s' "${OIDC_CLIENT_SECRET}"
+            fi
+        } > "$poll_data_file"
+
         local response http_code
         response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
             -w '\n%{http_code}' \
             -X POST "$_OIDC_TOKEN_ENDPOINT" \
-            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-            --data-urlencode "device_code=${_OIDC_DEVICE_CODE}" \
-            --data-urlencode "client_id=${OIDC_CLIENT_ID}" \
-            ${OIDC_CLIENT_SECRET:+--data-urlencode "client_secret=${OIDC_CLIENT_SECRET}"} 2>&1)
+            -d @"$poll_data_file" 2>&1)
+        rm -f "$poll_data_file"
         local curl_exit=$?
 
         # Network-level error (curl itself failed)
@@ -917,12 +927,18 @@ oidc_get_certificate() {
         return 1
     }
 
+    # Write JSON body to temp file to avoid cmdline exposure of ott (ID token)
+    local body_file
+    body_file=$(umask 077 && mktemp)
+    printf '%s' "$json_body" > "$body_file"
+
     local response
     response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
         -w '\n%{http_code}' \
         -X POST "$ca_endpoint" \
         -H "Content-Type: application/json" \
-        -d "$json_body" 2>&1)
+        -d @"$body_file" 2>&1)
+    rm -f "$body_file"
     local curl_exit=$?
 
     if [ $curl_exit -ne 0 ]; then
