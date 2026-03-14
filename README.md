@@ -31,7 +31,26 @@ English | [日本語](README.ja.md)
 
 ## Installation
 
-### Option 1: Quick Install (Recommended)
+### Option 1: Install from Release (Recommended)
+
+```bash
+# Download release binary and checksum
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh -o /tmp/smart-ssh
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh.sha256 -o /tmp/smart-ssh.sha256
+
+# Verify checksum
+cd /tmp && sha256sum -c smart-ssh.sha256
+
+# Install
+sudo install -m 755 /tmp/smart-ssh /usr/local/bin/smart-ssh
+
+# Verify installation
+smart-ssh --help
+```
+
+### Option 2: Development Install
+
+> **Warning**: This installs from the latest HEAD and is not version-pinned. Use for development only.
 
 ```bash
 # Download and install to /usr/local/bin
@@ -42,7 +61,7 @@ sudo chmod +x /usr/local/bin/smart-ssh
 smart-ssh --help
 ```
 
-### Option 2: Manual Install
+### Option 3: Manual Install
 
 ```bash
 # Clone the repository
@@ -64,7 +83,7 @@ cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
 smart-ssh --help
 ```
 
-### Option 3: User-local Install (No sudo required)
+### Option 4: User-local Install (No sudo required)
 
 ```bash
 # Create local bin directory if it doesn't exist
@@ -281,21 +300,28 @@ smart-ssh --debug
 
 # Help
 smart-ssh --help
+
+# Show version
+smart-ssh --version
 ```
 
 ## Network Detection Methods
 
 smart-ssh uses the following detection methods in priority order:
 
-| Priority | Method      | Description                                                      |
-|----------|-------------|------------------------------------------------------------------|
-| 1        | Tailscale   | Destination host in Tailscale CGNAT range or MagicDNS (*.ts.net) |
-| 2        | Gateway MAC | Router MAC address via ARP (no permissions needed)               |
-| 3        | IP Address  | CIDR range matching (fallback)                                   |
+| Priority | Method      | Description                                                                                     |
+|----------|-------------|-------------------------------------------------------------------------------------------------|
+| 1        | Tailscale   | `tailscale whois` CLI query; falls back to CGNAT range (100.64.0.0/10) and MagicDNS (*.ts.net)  |
+| 2        | Gateway MAC | Router MAC address via ARP (no permissions needed)                                              |
+| 3        | IP Address  | CIDR range matching (fallback)                                                                  |
 
 ### Tailscale Detection
 
-When `TAILSCALE_AS_HOME=true` (default), connections to Tailscale nodes are automatically treated as home network. Detection checks the SSH target's resolved hostname for:
+When `TAILSCALE_AS_HOME=true` (default), connections to Tailscale nodes are automatically treated as home network.
+
+**Primary**: uses `tailscale whois --json` to query the local Tailscale daemon for authoritative peer information.
+
+**Fallback** (when the CLI is unavailable): checks the SSH target's resolved hostname for:
 
 - IP addresses in the Tailscale CGNAT range (`100.64.0.0/10`)
 - MagicDNS hostnames (`*.ts.net`)
@@ -371,6 +397,51 @@ Use `--oidc` to force OIDC authentication regardless of network detection or aut
 smart-ssh --oidc production
 ```
 
+### OIDC Operational Guide
+
+#### CA Prerequisites
+
+- [step-ca](https://smallstep.com/docs/step-ca/) with an OIDC provisioner configured
+- The CA must be reachable from the client at the URL specified in `OIDC_CA_URL`
+
+#### Client Secret Handling
+
+**Strongly recommend using public clients (no client secret).** Configure your OIDC provider to allow the Device Flow grant without a secret.
+
+If a secret is unavoidable:
+
+- Storing `OIDC_CLIENT_SECRET` in the config file is **insecure** (world-readable by default)
+- Store it in an environment variable with restricted permissions instead:
+
+```bash
+# Set in shell profile with restricted permissions
+chmod 600 ~/.bashrc  # or ~/.zshrc
+export OIDC_CLIENT_SECRET="your-secret"
+```
+
+#### Certificate Management
+
+| Variable             | Description                                       | Default              |
+|----------------------|---------------------------------------------------|----------------------|
+| `OIDC_CERT_LIFETIME` | Certificate validity in seconds (max 86400 / 24h) | `3600`               |
+| `OIDC_CERT_DIR`      | Directory to cache issued certificates            | `~/.ssh/oidc-certs`  |
+
+To clear the certificate cache:
+
+```bash
+rm ~/.ssh/oidc-certs/*
+```
+
+#### Audit Logging
+
+Certificate issuance is logged on the CA side. Check your step-ca logs for audit records of OIDC-issued certificates.
+
+#### Client Requirements
+
+- `jq` — JSON parsing
+- `curl` — HTTP requests
+- An OIDC provider that supports the Device Authorization Flow (RFC 8628) — e.g., Google, Keycloak, Okta
+
 ## Example Workflow
 
 1. **Tailscale host**: Connects using regular SSH key (no touch required)
@@ -394,6 +465,28 @@ smart-ssh --oidc production
 - **Network-based detection**: Gateway MAC and IP-based detection for reliable identification
 - **Phishing resistance**: Security keys provide cryptographic proof of server identity
 - **Physical presence**: Touch requirement ensures physical access to the key
+
+## Threat Model & Trust Boundaries
+
+All client-side network detection in smart-ssh is a **UX convenience feature**, not a security boundary. The actual security control is server-side enforcement.
+
+### What IS protected
+
+- **Server-side source IP enforcement**: `Match Address` in `sshd_config` restricts which key algorithms and auth methods are accepted based on the client's source IP. This cannot be bypassed by a client.
+
+### What is NOT protected
+
+Client-side detection cannot prevent a determined attacker who controls the network or the client machine.
+
+| Detection method  | Limitation                                                                                          |
+|-------------------|-----------------------------------------------------------------------------------------------------|
+| `tailscale whois` | Relies on the local Tailscale daemon; does not provide guarantees beyond local privilege separation |
+| Gateway MAC       | Trivially spoofable in adversarial environments (ARP spoofing)                                      |
+| IP/CIDR           | Any network can use the same address range; not unique to your home                                 |
+
+### Design intent
+
+smart-ssh uses client-side detection only to select the most convenient authentication method for the detected context. Even if detection is fooled, the server will reject authentication attempts that do not match its enforced policy (e.g., a regular key will be rejected by the server when connecting from an external IP that falls under the `Match all` block requiring `touch-required` security keys).
 
 ## Tab Completion
 

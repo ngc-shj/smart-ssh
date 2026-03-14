@@ -5,6 +5,8 @@
 # Usage: smart-ssh <hostname>
 # Example: smart-ssh hostname
 
+VERSION="1.0.0"
+
 # Configuration file path (XDG Base Directory compliant)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/smart-ssh"
 CONFIG_FILE="$CONFIG_DIR/config"
@@ -220,6 +222,7 @@ usage() {
     echo "  --init-config        Create default configuration file"
     echo "  --debug, -d          Show debug information"
     echo "  --help, -h           Show this help message"
+    echo "  --version            Show version information"
     echo "  --                   End of smart-ssh options (remaining args are SSH options)"
     echo ""
     echo "SSH Options:"
@@ -254,8 +257,10 @@ init_config() {
 # Lines starting with # are comments
 
 # Treat Tailscale hosts as home network (true/false)
-# When enabled, connections to Tailscale nodes (100.64.0.0/10, *.ts.net)
-# are treated as home network and use regular public key authentication
+# When enabled, connections to Tailscale nodes are treated as home network
+# and use regular public key authentication.
+# Detection: uses 'tailscale whois' CLI if available, otherwise falls back
+# to heuristic detection (CGNAT range 100.64.0.0/10, MagicDNS *.ts.net)
 # Default: true
 TAILSCALE_AS_HOME=true
 
@@ -594,7 +599,8 @@ resolve_hostname() {
 }
 
 # Check if the SSH target host is a Tailscale node
-# Tailscale uses CGNAT range 100.64.0.0/10 and MagicDNS *.ts.net
+# Primary: uses 'tailscale whois' CLI for authoritative detection
+# Fallback: CGNAT range 100.64.0.0/10 and MagicDNS *.ts.net (degraded)
 is_tailscale_host() {
     local hostname="$1"
 
@@ -608,16 +614,43 @@ is_tailscale_host() {
 
     log_debug "Tailscale check: resolved HostName=$resolved_host"
 
+    # Primary detection: use 'tailscale whois' if available
+    if command -v tailscale >/dev/null 2>&1; then
+        # Check if Tailscale daemon is running
+        if tailscale status >/dev/null 2>&1; then
+            local whois_output
+            if whois_output=$(tailscale whois --json "$resolved_host" 2>/dev/null) && [ -n "$whois_output" ]; then
+                # Validate JSON and check Node.ID exists and is non-zero
+                local node_id
+                if node_id=$(echo "$whois_output" | jq -r '.Node.ID // 0' 2>/dev/null); then
+                    if [ -n "$node_id" ] && [ "$node_id" != "0" ] && [ "$node_id" != "null" ]; then
+                        log_debug "Tailscale detected via whois: Node.ID=$node_id ($resolved_host)"
+                        return 0
+                    fi
+                else
+                    log_debug "Tailscale whois: jq parse failed for $resolved_host"
+                fi
+            fi
+            log_debug "Tailscale whois: $resolved_host is not a Tailscale node"
+            return 1
+        else
+            log_warn "Tailscale CLI found but daemon is not running; falling back to heuristic detection"
+        fi
+    else
+        log_debug "Tailscale CLI not found; using heuristic detection (CGNAT/MagicDNS)"
+    fi
+
+    # Fallback: heuristic detection (degraded)
     # Check if HostName is a Tailscale MagicDNS name (*.ts.net)
     if [[ "$resolved_host" == *.ts.net ]]; then
-        log_debug "Tailscale detected: MagicDNS hostname ($resolved_host)"
+        log_debug "Tailscale detected (heuristic): MagicDNS hostname ($resolved_host)"
         return 0
     fi
 
     # Check if HostName is an IP in Tailscale CGNAT range (100.64.0.0/10)
     if validate_ip "$resolved_host"; then
         if ip_in_cidr "$resolved_host" "100.64.0.0/10"; then
-            log_debug "Tailscale detected: CGNAT IP ($resolved_host)"
+            log_debug "Tailscale detected (heuristic): CGNAT IP ($resolved_host)"
             return 0
         fi
         return 1
@@ -628,7 +661,7 @@ is_tailscale_host() {
     resolved_ip=$(resolve_hostname "$resolved_host")
     if [ -n "$resolved_ip" ] && validate_ip "$resolved_ip"; then
         if ip_in_cidr "$resolved_ip" "100.64.0.0/10"; then
-            log_debug "Tailscale detected: DNS resolved to CGNAT IP ($resolved_host -> $resolved_ip)"
+            log_debug "Tailscale detected (heuristic): DNS resolved to CGNAT IP ($resolved_host -> $resolved_ip)"
             return 0
         fi
     fi
@@ -650,6 +683,34 @@ check_oidc_dependencies() {
     if [ ${#missing[@]} -gt 0 ]; then
         log_error "OIDC requires missing dependencies: ${missing[*]}"
         log_error "Install them and try again."
+        return 1
+    fi
+    return 0
+}
+
+# Validate SSH hostname for safe use in temp config files
+# Prevents injection via newlines, spaces, or wildcards
+validate_ssh_hostname() {
+    local name="$1"
+    if [[ ! "$name" =~ ^[a-zA-Z0-9._:%-]+$ ]]; then
+        if [[ "$name" == *,* ]]; then
+            log_error "Multi-hop ProxyJump ('$name') is not supported in security key / OIDC mode"
+        else
+            log_error "Invalid SSH hostname: '$name' (contains unsafe characters)"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Validate OIDC_CERT_LIFETIME (positive integer, max 86400 seconds = 24 hours)
+validate_oidc_cert_lifetime() {
+    if [[ ! "$OIDC_CERT_LIFETIME" =~ ^[0-9]+$ ]]; then
+        log_error "OIDC_CERT_LIFETIME must be a positive integer <= 86400 (got: '${OIDC_CERT_LIFETIME}')"
+        return 1
+    fi
+    if [ "$OIDC_CERT_LIFETIME" -le 0 ] || [ "$OIDC_CERT_LIFETIME" -gt 86400 ]; then
+        log_error "OIDC_CERT_LIFETIME must be a positive integer <= 86400 (got: '${OIDC_CERT_LIFETIME}')"
         return 1
     fi
     return 0
@@ -762,6 +823,12 @@ oidc_device_authorize() {
 
     if [ -z "$_OIDC_DEVICE_CODE" ] || [ -z "$_OIDC_USER_CODE" ] || [ -z "$_OIDC_VERIFICATION_URI" ]; then
         log_error "Device authorization response missing required fields"
+        return 2
+    fi
+
+    # Validate verification_uri uses https:// to prevent phishing
+    if [[ "$_OIDC_VERIFICATION_URI" != https://* ]]; then
+        log_error "verification_uri must use https:// (got: '$_OIDC_VERIFICATION_URI')"
         return 2
     fi
 
@@ -1157,12 +1224,18 @@ ssh_with_oidc() {
     shift 2
     local ssh_options=("$@")
 
+    # Sanitize hostname before writing to temp config
+    if ! validate_ssh_hostname "$hostname"; then
+        return 1
+    fi
+
     local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
     local key_file="${OIDC_CERT_DIR}/id_oidc"
 
     # 1. Check prerequisites
     check_oidc_dependencies || return 1
     validate_oidc_urls || return 1
+    validate_oidc_cert_lifetime || return 1
 
     # 2. Prepare certificate directory
     ensure_oidc_cert_dir || return 1
@@ -1200,6 +1273,10 @@ ssh_with_oidc() {
     proxy_jump=$(echo "$ssh_g_host" | grep "^proxyjump " | awk '{print $2}')
 
     if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
+        # Sanitize proxy_jump before writing to temp config
+        if ! validate_ssh_hostname "$proxy_jump"; then
+            return 1
+        fi
         log_debug "ProxyJump detected for OIDC: $proxy_jump"
         local ssh_g_proxy
         ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
@@ -1276,6 +1353,11 @@ ssh_from_away() {
     shift 2
     local ssh_options=("$@")
 
+    # Sanitize hostname before writing to temp config
+    if ! validate_ssh_hostname "$hostname"; then
+        return 1
+    fi
+
     # Check if security key file exists
     if [ ! -f "$SECURITY_KEY_PATH" ]; then
         print_error "Error: Security key file not found: $SECURITY_KEY_PATH"
@@ -1314,6 +1396,10 @@ ssh_from_away() {
 
     # If ProxyJump is configured, add the proxy host configuration first
     if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
+        # Sanitize proxy_jump before writing to temp config
+        if ! validate_ssh_hostname "$proxy_jump"; then
+            return 1
+        fi
         log_debug "ProxyJump detected: $proxy_jump"
         local ssh_g_proxy
         ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
@@ -1341,6 +1427,11 @@ ssh_from_away() {
         local target_hostname
         target_hostname=$(echo "$ssh_g_host" | grep "^hostname " | awk '{print $2}')
 
+        # Sanitize target_hostname before use
+        if [ -n "$target_hostname" ] && ! validate_ssh_hostname "$target_hostname"; then
+            return 1
+        fi
+
         # If target_hostname is a Host alias (not a FQDN/IP), resolve it
         local is_alias=false
         local ssh_g_target=""
@@ -1348,6 +1439,10 @@ ssh_from_away() {
             ssh_g_target=$(ssh -G "$target_hostname" 2>/dev/null)
             local alias_hostname
             alias_hostname=$(echo "$ssh_g_target" | grep "^hostname " | awk '{print $2}')
+            # Sanitize alias_hostname before use
+            if [ -n "$alias_hostname" ] && ! validate_ssh_hostname "$alias_hostname"; then
+                return 1
+            fi
             # Check if the alias resolves to a different hostname (meaning it's a Host entry)
             if [ -n "$alias_hostname" ] && [ "$alias_hostname" != "$target_hostname" ]; then
                 log_debug "HostName alias detected: $target_hostname -> $alias_hostname"
@@ -1431,6 +1526,10 @@ main() {
                 ;;
             --help|-h)
                 usage
+                exit 0
+                ;;
+            --version)
+                echo "smart-ssh $VERSION"
                 exit 0
                 ;;
             --oidc)
@@ -1619,6 +1718,10 @@ debug_info() {
     echo "  Config file: $CONFIG_FILE"
     echo "  Config file exists: $([ -f "$CONFIG_FILE" ] && echo "Yes" || echo "No")"
     echo "  TAILSCALE_AS_HOME: $TAILSCALE_AS_HOME"
+    echo "  Tailscale CLI: $(command -v tailscale >/dev/null 2>&1 && echo 'available' || echo 'not found')"
+    if command -v tailscale >/dev/null 2>&1; then
+        echo "  Tailscale daemon: $(tailscale status >/dev/null 2>&1 && echo 'running' || echo 'not running')"
+    fi
     echo "  HOME_GATEWAY_MAC: ${HOME_GATEWAY_MAC:-<not configured>}"
     echo "  HOME_NETWORK: $HOME_NETWORK"
     echo "  SECURITY_KEY_PATH: $SECURITY_KEY_PATH"
@@ -1678,7 +1781,7 @@ debug_info() {
     echo ""
     echo "SSH configuration check:"
     if [ -f ~/.ssh/config ]; then
-        echo "~/.ssh/config exists"
+        echo "$HOME/.ssh/config exists"
         echo "Available host entries (including Include directives):"
 
         # Parse SSH config including Include directives (same logic as completions)
@@ -1709,7 +1812,7 @@ debug_info() {
             }
         ' ~/.ssh/config 2>/dev/null | grep -v "[*?!]" | sort -u | head -20 || echo "  No Host entries found"
     else
-        echo "~/.ssh/config does not exist"
+        echo "$HOME/.ssh/config does not exist"
     fi
     echo "========================="
 }
@@ -1721,6 +1824,9 @@ case "$1" in
         ;;
     --help|-h|"")
         usage
+        ;;
+    --version)
+        echo "smart-ssh $VERSION"
         ;;
     --oidc)
         main "$@"
