@@ -10,6 +10,7 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-latest
@@ -19,16 +20,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install bats-core
-        run: npm install -g bats
-
-      - name: Install shellcheck
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            brew install shellcheck
-          else
-            sudo apt-get install -y shellcheck
-          fi
+          sudo apt-get update
+          sudo apt-get install -y bats shellcheck
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install bats-core shellcheck
 
       - name: Run ShellCheck
         run: shellcheck -e SC2155,SC2129,SC2181,SC2029 smart-ssh
