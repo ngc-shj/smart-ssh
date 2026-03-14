@@ -39,11 +39,11 @@ teardown() {
     [[ "$output" =~ "--help" ]]
 }
 
-# Test: Invalid option
+# Test: Invalid option (treated as SSH option, but no hostname → error)
 @test "smart-ssh with invalid option shows error" {
     run "$SMART_SSH" --invalid-option
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Unknown option" ]]
+    [[ "$output" =~ "Please specify a hostname" ]]
 }
 
 # Test: No hostname argument
@@ -70,10 +70,22 @@ teardown() {
     grep -q "LOG_LEVEL=" "$CONFIG_FILE"
 }
 
+# Helper: source functions from smart-ssh via temp file (bash 3.2 compatible)
+# Usage: _source_fn func_name [func_name ...]
+_source_fn() {
+    local _tmp
+    _tmp=$(mktemp)
+    for _fn in "$@"; do
+        sed -n "/^${_fn}()/,/^}/p" "$SMART_SSH" >> "$_tmp"
+    done
+    # shellcheck disable=SC1090
+    source "$_tmp"
+    rm -f "$_tmp"
+}
+
 # Test: IP address validation (helper function test)
 @test "validate IP address format" {
-    # Source functions from script
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip
 
     # Valid IPs
     run validate_ip "192.168.1.1"
@@ -95,10 +107,7 @@ teardown() {
 
 # Test: CIDR validation
 @test "validate CIDR format" {
-    # Source necessary functions
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^print_error()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^validate_cidr()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip print_error validate_cidr
     export COLOR_RED='' COLOR_RESET=''
 
     # Valid CIDR
@@ -119,8 +128,7 @@ teardown() {
 
 # Test: IP to integer conversion
 @test "convert IP to integer" {
-    # Source the function
-    source <(sed -n '/^ip_to_int()/,/^}/p' "$SMART_SSH")
+    _source_fn ip_to_int
 
     result=$(ip_to_int "192.168.1.1")
     [ "$result" -eq 3232235777 ]
@@ -199,11 +207,7 @@ teardown() {
 
 # Test: Tailscale CGNAT IP range detection
 @test "Tailscale CGNAT IP range (100.64.0.0/10) is detected" {
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^print_error()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^validate_cidr()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^ip_to_int()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^ip_in_cidr()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr
     export COLOR_RED='' COLOR_RESET=''
 
     # Tailscale IPs (100.64.0.0/10 = 100.64.0.0 - 100.127.255.255)
@@ -250,4 +254,276 @@ teardown() {
     "$SMART_SSH" --init-config > /dev/null 2>&1
     [ -f "$CONFIG_FILE" ]
     grep -q "TAILSCALE_AS_HOME=" "$CONFIG_FILE"
+}
+
+# ============================================================
+# OIDC Tests
+# ============================================================
+
+# Test: Config file contains OIDC keys
+@test "config file contains OIDC keys" {
+    "$SMART_SSH" --init-config > /dev/null 2>&1
+    [ -f "$CONFIG_FILE" ]
+    grep -q "OIDC_ENABLED=" "$CONFIG_FILE"
+    grep -q "OIDC_ISSUER=" "$CONFIG_FILE"
+    grep -q "OIDC_AUTH_MODE=" "$CONFIG_FILE"
+}
+
+# Test: OIDC settings shown in debug output
+@test "OIDC settings shown in debug output" {
+    run "$SMART_SSH" --debug
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "OIDC:" ]]
+    [[ "$output" =~ "OIDC_ENABLED:" ]]
+}
+
+# Test: validate_oidc_urls() accepts https:// URLs
+@test "validate_oidc_urls accepts https:// URLs" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="https://accounts.example.com"
+    export OIDC_CA_URL="https://ca.example.com"
+
+    validate_oidc_urls 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: validate_oidc_urls() rejects http:// URLs
+@test "validate_oidc_urls rejects http:// URLs" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="http://accounts.example.com"
+    export OIDC_CA_URL="https://ca.example.com"
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: validate_oidc_urls() rejects empty OIDC_ISSUER
+@test "validate_oidc_urls rejects empty OIDC_ISSUER" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER=""
+    export OIDC_CA_URL="https://ca.example.com"
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: check_oidc_dependencies() returns 0 when jq and curl are available
+@test "check_oidc_dependencies succeeds when jq and curl are available" {
+    # Skip if jq or curl is not installed
+    if ! command -v jq >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        skip "jq or curl not available"
+    fi
+
+    _source_fn print_error log_error check_oidc_dependencies
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    check_oidc_dependencies 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: should_use_oidc() - auto mode with sk key missing returns 0 (use OIDC)
+@test "should_use_oidc: auto mode with sk key missing returns 0" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=true
+    export OIDC_AUTH_MODE=auto
+    export SECURITY_KEY_PATH="$TEST_CONFIG_DIR/nonexistent_key"  # does not exist
+
+    should_use_oidc
+    [ "$?" -eq 0 ]
+}
+
+# Test: should_use_oidc() - auto mode with sk key present returns 1 (skip OIDC)
+@test "should_use_oidc: auto mode with sk key present returns 1" {
+    _source_fn should_use_oidc
+    touch "$TEST_CONFIG_DIR/sk_key"
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=true
+    export OIDC_AUTH_MODE=auto
+    export SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk_key"
+
+    ret=0; should_use_oidc || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: should_use_oidc() - prefer mode returns 0
+@test "should_use_oidc: prefer mode returns 0" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=true
+    export OIDC_AUTH_MODE=prefer
+
+    should_use_oidc
+    [ "$?" -eq 0 ]
+}
+
+# Test: should_use_oidc() - only mode returns 0
+@test "should_use_oidc: only mode returns 0" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=true
+    export OIDC_AUTH_MODE=only
+
+    should_use_oidc
+    [ "$?" -eq 0 ]
+}
+
+# Test: should_use_oidc() - disabled mode returns 1
+@test "should_use_oidc: disabled mode returns 1" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=true
+    export OIDC_AUTH_MODE=disabled
+
+    ret=0; should_use_oidc || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: should_use_oidc() - OIDC_ENABLED=false returns 1
+@test "should_use_oidc: OIDC_ENABLED=false returns 1" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=false
+    export OIDC_ENABLED=false
+    export OIDC_AUTH_MODE=prefer
+
+    ret=0; should_use_oidc || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: should_use_oidc() - FORCE_OIDC=true overrides OIDC_ENABLED=false
+@test "should_use_oidc: FORCE_OIDC=true overrides OIDC_ENABLED=false" {
+    _source_fn should_use_oidc
+    export FORCE_OIDC=true
+    export OIDC_ENABLED=false
+    export OIDC_AUTH_MODE=disabled
+
+    should_use_oidc
+    [ "$?" -eq 0 ]
+}
+
+# Test: oidc_check_cached_cert() returns 1 when cert file is absent
+@test "oidc_check_cached_cert returns 1 when cert file is absent" {
+    _source_fn print_error print_debug log_error log_debug oidc_check_cached_cert
+    export COLOR_RED='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$OIDC_CERT_DIR"
+    # Neither cert nor key exists
+
+    ret=0; oidc_check_cached_cert 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: oidc_check_cached_cert() returns 1 when key file is absent
+@test "oidc_check_cached_cert returns 1 when key file is absent" {
+    _source_fn print_error print_debug log_error log_debug oidc_check_cached_cert
+    export COLOR_RED='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$OIDC_CERT_DIR"
+    # Create cert file but not key file
+    touch "$OIDC_CERT_DIR/id_oidc-cert.pub"
+
+    ret=0; oidc_check_cached_cert 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: validate_oidc_urls() rejects empty OIDC_CA_URL
+@test "validate_oidc_urls rejects empty OIDC_CA_URL" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="https://accounts.example.com"
+    export OIDC_CA_URL=""
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: validate_oidc_urls() rejects http:// OIDC_CA_URL
+@test "validate_oidc_urls rejects http:// OIDC_CA_URL" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="https://accounts.example.com"
+    export OIDC_CA_URL="http://ca.example.com"
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_oidc_cert_dir() creates cert directory
+@test "ensure_oidc_cert_dir creates cert directory" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+
+    ensure_oidc_cert_dir 2>/dev/null
+    [ "$?" -eq 0 ]
+    [ -d "$OIDC_CERT_DIR" ]
+    # Verify directory permissions are 700
+    local perms
+    perms=$(stat -f '%Lp' "$OIDC_CERT_DIR" 2>/dev/null || stat -c '%a' "$OIDC_CERT_DIR" 2>/dev/null)
+    [ "$perms" = "700" ]
+}
+
+# Test: ensure_oidc_cert_dir() rejects symlink in OIDC_CERT_DIR
+@test "ensure_oidc_cert_dir rejects symlink" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    # Create a symlink as OIDC_CERT_DIR target
+    ln -s /tmp "$TEST_CONFIG_DIR/.ssh/oidc-certs"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+
+    ret=0; ensure_oidc_cert_dir 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_oidc_cert_dir() rejects symlink on ~/.ssh itself
+@test "ensure_oidc_cert_dir rejects symlink on ssh dir" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    # Create ~/.ssh as a symlink
+    ln -s /tmp "$TEST_CONFIG_DIR/.ssh"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+
+    ret=0; ensure_oidc_cert_dir 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_oidc_cert_dir() creates both ~/.ssh and cert dir
+@test "ensure_oidc_cert_dir creates ssh dir and cert dir" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+    # Neither ~/.ssh nor cert dir exist
+
+    ensure_oidc_cert_dir 2>/dev/null
+    [ "$?" -eq 0 ]
+    [ -d "$TEST_CONFIG_DIR/.ssh" ]
+    [ -d "$OIDC_CERT_DIR" ]
+}
+
+# Test: --oidc with missing OIDC config shows error
+@test "--oidc with missing OIDC config shows error" {
+    run env OIDC_ISSUER="" OIDC_CA_URL="" \
+        OIDC_CERT_DIR="$TEST_CONFIG_DIR/empty-oidc-certs" \
+        "$SMART_SSH" --dry-run --oidc test-host
+    [ "$status" -ne 0 ]
 }
