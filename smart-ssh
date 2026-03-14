@@ -726,8 +726,8 @@ oidc_device_authorize() {
     local response
     response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
         -X POST "$_OIDC_DEVICE_ENDPOINT" \
-        -d "client_id=${OIDC_CLIENT_ID}" \
-        -d "scope=${OIDC_SCOPES}" 2>&1)
+        --data-urlencode "client_id=${OIDC_CLIENT_ID}" \
+        --data-urlencode "scope=${OIDC_SCOPES}" 2>&1)
     if [ $? -ne 0 ]; then
         log_error "Device authorization request failed: $response"
         return 2
@@ -790,24 +790,39 @@ oidc_poll_token() {
         local sleep_time="${_OIDC_POLL_INTERVAL_OVERRIDE:-$current_interval}"
 
         sleep "$sleep_time"
-        elapsed=$((elapsed + sleep_time))
+        # Ensure elapsed always advances to prevent infinite loop
+        local increment=$(( sleep_time > 0 ? sleep_time : 1 ))
+        elapsed=$((elapsed + increment))
 
-        local response
-        response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+        # Do NOT use --fail here: RFC 8628 returns HTTP 400 for
+        # authorization_pending/slow_down which are expected responses
+        local response http_code
+        response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
+            -w '\n%{http_code}' \
             -X POST "$_OIDC_TOKEN_ENDPOINT" \
-            -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-            -d "device_code=${_OIDC_DEVICE_CODE}" \
-            -d "client_id=${OIDC_CLIENT_ID}" 2>&1)
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+            --data-urlencode "device_code=${_OIDC_DEVICE_CODE}" \
+            --data-urlencode "client_id=${OIDC_CLIENT_ID}" 2>&1)
         local curl_exit=$?
 
-        # Network-level error
+        # Network-level error (curl itself failed)
         if [ $curl_exit -ne 0 ]; then
             log_error "Token poll request failed: $response"
             return 2
         fi
 
+        # Extract HTTP status code (last line) and response body
+        http_code=$(echo "$response" | tail -1)
+        response=$(echo "$response" | sed '$d')
+
+        # HTTP 5xx or non-JSON response: server error
+        if [ "${http_code:-0}" -ge 500 ]; then
+            log_error "Token endpoint server error (HTTP $http_code)"
+            return 2
+        fi
+
         if ! echo "$response" | jq -e . >/dev/null 2>&1; then
-            log_error "Token endpoint returned malformed JSON"
+            log_error "Token endpoint returned malformed response"
             return 2
         fi
 
@@ -863,17 +878,26 @@ oidc_get_certificate() {
     log_debug "Requesting SSH certificate from CA: $ca_endpoint"
 
     # Generate a new ephemeral key pair for the certificate
+    # NOTE: Do not use 'trap RETURN' here - it would override the caller's trap
     local temp_key
     temp_key=$(umask 077 && mktemp)
-    trap 'rm -f "$temp_key" "${temp_key}.pub"' RETURN
 
-    if ! ssh-keygen -t ed25519 -f "$temp_key" -N "" -q 2>&1; then
+    if ! ssh-keygen -t ed25519 -f "$temp_key" -N "" -q >/dev/null 2>&1; then
         log_error "Failed to generate ephemeral key pair"
-        return 2
+        rm -f "$temp_key" "${temp_key}.pub"
+        return 1
     fi
 
     local pub_key
     pub_key=$(cat "${temp_key}.pub")
+
+    # Build JSON request body safely using jq
+    local json_body
+    json_body=$(jq -n \
+        --arg pk "$pub_key" \
+        --arg prov "$OIDC_CA_PROVISIONER" \
+        --arg lifetime "+${OIDC_CERT_LIFETIME}s" \
+        '{"publicKey":$pk,"certType":"user","provisioner":$prov,"validAfter":"","validBefore":$lifetime}')
 
     # Send ID token via stdin to avoid cmdline exposure
     local response
@@ -882,16 +906,18 @@ oidc_get_certificate() {
         -X POST "$ca_endpoint" \
         -H @- \
         -H "Content-Type: application/json" \
-        -d "{\"publicKey\":\"${pub_key}\",\"certType\":\"user\",\"provisioner\":\"${OIDC_CA_PROVISIONER}\",\"validAfter\":\"\",\"validBefore\":\"+${OIDC_CERT_LIFETIME}s\"}" 2>&1)
+        -d "$json_body" 2>&1)
     local curl_exit=$?
 
     if [ $curl_exit -ne 0 ]; then
         log_error "CA certificate request failed: $response"
+        rm -f "$temp_key" "${temp_key}.pub"
         return 2
     fi
 
     if ! echo "$response" | jq -e . >/dev/null 2>&1; then
         log_error "CA returned malformed JSON"
+        rm -f "$temp_key" "${temp_key}.pub"
         return 2
     fi
 
@@ -899,19 +925,25 @@ oidc_get_certificate() {
     cert=$(echo "$response" | jq -r '.crt // empty')
     if [ -z "$cert" ]; then
         log_error "CA response missing certificate (crt field)"
+        rm -f "$temp_key" "${temp_key}.pub"
         return 2
     fi
 
     # Save certificate and private key with secure permissions
     (umask 077 && printf '%s\n' "$cert" > "$cert_file") || {
         log_error "Failed to write certificate file: $cert_file"
+        rm -f "$temp_key" "${temp_key}.pub"
         return 2
     }
     (umask 077 && cp "$temp_key" "$key_file") || {
         log_error "Failed to write key file: $key_file"
+        rm -f "$temp_key" "${temp_key}.pub"
         return 2
     }
     chmod 600 "$cert_file" "$key_file"
+
+    # Clean up ephemeral key pair
+    rm -f "$temp_key" "${temp_key}.pub"
 
     log_debug "Certificate saved: $cert_file"
     log_debug "Key saved: $key_file"
@@ -968,6 +1000,12 @@ oidc_check_cached_cert() {
 ensure_oidc_cert_dir() {
     local ssh_dir="$HOME/.ssh"
 
+    # Reject symlinks for security (check before mkdir)
+    if [ -L "$ssh_dir" ]; then
+        log_error "Security error: $ssh_dir is a symlink"
+        return 1
+    fi
+
     # Create ~/.ssh if it does not exist
     if [ ! -e "$ssh_dir" ]; then
         mkdir -m 700 "$ssh_dir" || {
@@ -976,9 +1014,9 @@ ensure_oidc_cert_dir() {
         }
     fi
 
-    # Reject symlinks for security
-    if [ -L "$ssh_dir" ]; then
-        log_error "Security error: $ssh_dir is a symlink"
+    # Reject symlinks for security (check before mkdir)
+    if [ -L "$OIDC_CERT_DIR" ]; then
+        log_error "Security error: $OIDC_CERT_DIR is a symlink"
         return 1
     fi
 
@@ -988,11 +1026,6 @@ ensure_oidc_cert_dir() {
             log_error "Failed to create OIDC cert directory: $OIDC_CERT_DIR"
             return 1
         }
-    fi
-
-    if [ -L "$OIDC_CERT_DIR" ]; then
-        log_error "Security error: $OIDC_CERT_DIR is a symlink"
-        return 1
     fi
 
     if [ ! -d "$OIDC_CERT_DIR" ]; then
@@ -1370,11 +1403,12 @@ main() {
     # Force OIDC if requested (skip network detection)
     if [ "$FORCE_OIDC" = true ]; then
         print_warning "OIDC authentication forced by --oidc option"
-        ssh_with_oidc "$hostname" "$dry_run" "${ssh_options[@]}" || {
-            local oidc_exit_code=$?
+        local oidc_exit_code=0
+        ssh_with_oidc "$hostname" "$dry_run" "${ssh_options[@]}" || oidc_exit_code=$?
+        if [ "$oidc_exit_code" -ne 0 ]; then
             log_error "OIDC authentication failed (exit $oidc_exit_code)"
             exit "$oidc_exit_code"
-        }
+        fi
         return
     fi
 
