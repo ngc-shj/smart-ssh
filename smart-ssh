@@ -815,8 +815,14 @@ oidc_poll_token() {
         http_code=$(echo "$response" | tail -1)
         response=$(echo "$response" | sed '$d')
 
-        # HTTP 5xx or non-JSON response: server error
-        if [ "${http_code:-0}" -ge 500 ]; then
+        # Validate http_code is numeric
+        if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+            log_error "Token endpoint returned invalid HTTP status: $http_code"
+            return 2
+        fi
+
+        # HTTP 5xx: server error
+        if [ "$http_code" -ge 500 ]; then
             log_error "Token endpoint server error (HTTP $http_code)"
             return 2
         fi
@@ -897,11 +903,15 @@ oidc_get_certificate() {
         --arg pk "$pub_key" \
         --arg prov "$OIDC_CA_PROVISIONER" \
         --arg lifetime "+${OIDC_CERT_LIFETIME}s" \
-        '{"publicKey":$pk,"certType":"user","provisioner":$prov,"validAfter":"","validBefore":$lifetime}')
+        '{"publicKey":$pk,"certType":"user","provisioner":$prov,"validAfter":"","validBefore":$lifetime}') || {
+        log_error "Failed to build CA request JSON"
+        rm -f "$temp_key" "${temp_key}.pub"
+        return 1
+    }
 
     # Send ID token via stdin to avoid cmdline exposure
     local response
-    response=$(printf 'Authorization: Bearer %s' "$_OIDC_ID_TOKEN" | \
+    response=$(printf 'Authorization: Bearer %s\n' "$_OIDC_ID_TOKEN" | \
         curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
         -X POST "$ca_endpoint" \
         -H @- \
