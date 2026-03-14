@@ -71,15 +71,35 @@ teardown() {
 }
 
 # Helper: source functions from smart-ssh via temp file (bash 3.2 compatible)
+# Uses awk with brace-depth counting to correctly handle nested functions
 # Usage: _source_fn func_name [func_name ...]
 _source_fn() {
     local _tmp
     _tmp=$(mktemp)
     for _fn in "$@"; do
-        sed -n "/^${_fn}()/,/^}/p" "$SMART_SSH" >> "$_tmp"
+        awk -v fn="${_fn}" '
+        $0 ~ "^" fn "\\(\\)" { found=1; depth=0 }
+        found {
+            print
+            for (i=1; i<=length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                if (c == "}") depth--
+            }
+            if (found && depth <= 0 && NR > 1 && $0 ~ /}/) { found=0 }
+        }
+        ' "$SMART_SSH" >> "$_tmp"
     done
     # shellcheck disable=SC1090
     source "$_tmp"
+    # Verify function was extracted successfully
+    for _fn in "$@"; do
+        if ! declare -f "$_fn" >/dev/null 2>&1; then
+            echo "ERROR: _source_fn failed to extract function: $_fn" >&2
+            rm -f "$_tmp"
+            return 1
+        fi
+    done
     rm -f "$_tmp"
 }
 
@@ -169,9 +189,10 @@ _source_fn() {
 
 # Test: Dry-run mode with security key option
 @test "dry-run mode shows command without executing" {
-    # Create a dummy SSH config to pass check_ssh_config
-    mkdir -p ~/.ssh
-    echo -e "Host test-host\n    HostName example.com" > ~/.ssh/config
+    # Use isolated HOME to avoid touching real ~/.ssh/config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf "Host test-host\n    HostName example.com\n" > "$HOME/.ssh/config"
 
     # Create dummy security key
     touch "$SECURITY_KEY_PATH"
@@ -180,9 +201,7 @@ _source_fn() {
     [ "$status" -eq 0 ]
     [[ "$output" =~ "DRY RUN" ]]
     [[ "$output" =~ "Would execute:" ]]
-
-    # Cleanup
-    rm -f ~/.ssh/config "$SECURITY_KEY_PATH"
+    # Cleanup handled by teardown (rm -rf TEST_CONFIG_DIR)
 }
 
 # Test: Configuration file overwrite protection
@@ -526,4 +545,302 @@ _source_fn() {
         OIDC_CERT_DIR="$TEST_CONFIG_DIR/empty-oidc-certs" \
         "$SMART_SSH" --dry-run --oidc test-host
     [ "$status" -ne 0 ]
+}
+
+# ============================================================
+# Version Tests
+# ============================================================
+
+# Test: --version flag
+@test "smart-ssh --version shows version string" {
+    run "$SMART_SSH" --version
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "smart-ssh " ]]
+    # Version must be semver format
+    [[ "$output" =~ [0-9]+\.[0-9]+\.[0-9]+ ]]
+}
+
+# ============================================================
+# Input Sanitization Tests
+# ============================================================
+
+# Test: validate_ssh_hostname accepts valid hostnames
+@test "validate_ssh_hostname accepts valid hostnames" {
+    _source_fn print_error log_error validate_ssh_hostname
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    validate_ssh_hostname "example.com" 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    validate_ssh_hostname "192.168.1.1" 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    validate_ssh_hostname "my-host.local" 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    validate_ssh_hostname "host:2222" 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    validate_ssh_hostname "user%host" 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: validate_ssh_hostname rejects unsafe characters
+@test "validate_ssh_hostname rejects unsafe characters" {
+    _source_fn print_error log_error validate_ssh_hostname
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    # Wildcard
+    ret=0; validate_ssh_hostname "host*" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Space
+    ret=0; validate_ssh_hostname "host name" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Empty
+    ret=0; validate_ssh_hostname "" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Question mark
+    ret=0; validate_ssh_hostname "host?" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: validate_oidc_cert_lifetime accepts valid values
+@test "validate_oidc_cert_lifetime accepts valid values" {
+    _source_fn print_error log_error validate_oidc_cert_lifetime
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    OIDC_CERT_LIFETIME="3600"
+    validate_oidc_cert_lifetime 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    OIDC_CERT_LIFETIME="86400"
+    validate_oidc_cert_lifetime 2>/dev/null
+    [ "$?" -eq 0 ]
+
+    OIDC_CERT_LIFETIME="1"
+    validate_oidc_cert_lifetime 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: validate_oidc_cert_lifetime rejects invalid values
+@test "validate_oidc_cert_lifetime rejects invalid values" {
+    _source_fn print_error log_error validate_oidc_cert_lifetime
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    # Zero
+    OIDC_CERT_LIFETIME="0"
+    ret=0; validate_oidc_cert_lifetime 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Over max
+    OIDC_CERT_LIFETIME="86401"
+    ret=0; validate_oidc_cert_lifetime 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Non-numeric
+    OIDC_CERT_LIFETIME="abc"
+    ret=0; validate_oidc_cert_lifetime 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    # Negative
+    OIDC_CERT_LIFETIME="-1"
+    ret=0; validate_oidc_cert_lifetime 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# ============================================================
+# Tailscale whois Tests
+# ============================================================
+
+# Helper: create a temp script that sources functions and calls is_tailscale_host
+# Usage: _create_ts_test_script <mock_dir> <hostname>
+# The script sets PATH to mock_dir internally, so bash can find mock commands
+_create_ts_test_script() {
+    local mock_dir="$1"
+    local test_hostname="$2"
+    local _tmp
+    _tmp=$(mktemp)
+
+    # Set environment at top of script
+    cat >> "$_tmp" <<HEADER
+#!/bin/bash
+export PATH="$mock_dir"
+export COLOR_RED='' COLOR_BLUE='' COLOR_YELLOW='' COLOR_RESET=''
+export CURRENT_LOG_LEVEL=0
+HEADER
+
+    # Extract all needed functions from smart-ssh
+    for _fn in print_error print_warning print_debug log_error log_warn log_debug log_info validate_ip validate_cidr ip_to_int ip_in_cidr resolve_hostname is_tailscale_host; do
+        awk -v fn="${_fn}" '
+        $0 ~ "^" fn "\\(\\)" { found=1; depth=0 }
+        found {
+            print
+            for (i=1; i<=length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "{") depth++
+                if (c == "}") depth--
+            }
+            if (found && depth <= 0 && NR > 1 && $0 ~ /}/) { found=0 }
+        }
+        ' "$SMART_SSH" >> "$_tmp"
+    done
+
+    echo "is_tailscale_host \"$test_hostname\"" >> "$_tmp"
+    echo "$_tmp"
+}
+
+# Test: is_tailscale_host falls back to heuristic when CLI not found
+@test "is_tailscale_host: fallback to CGNAT heuristic when CLI absent" {
+    local mock_dir
+    mock_dir=$(mktemp -d "$TEST_CONFIG_DIR/ts_mock.XXXXXX")
+    cat > "$mock_dir/ssh" <<'MOCK_SSH'
+#!/bin/bash
+echo "hostname 100.100.1.1"
+MOCK_SSH
+    chmod +x "$mock_dir/ssh"
+
+    # Link common utilities needed by functions
+    for cmd in grep awk cut head tr; do
+        local cmd_path
+        cmd_path=$(command -v "$cmd" 2>/dev/null) && ln -sf "$cmd_path" "$mock_dir/$cmd"
+    done
+
+    local test_script
+    test_script=$(_create_ts_test_script "$mock_dir" "test-ts-host")
+
+    run bash "$test_script"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_tailscale_host returns 1 for non-Tailscale host when CLI absent
+@test "is_tailscale_host: non-CGNAT host returns 1 when CLI absent" {
+    local mock_dir
+    mock_dir=$(mktemp -d "$TEST_CONFIG_DIR/ts_mock.XXXXXX")
+    cat > "$mock_dir/ssh" <<'MOCK_SSH'
+#!/bin/bash
+echo "hostname 203.0.113.1"
+MOCK_SSH
+    chmod +x "$mock_dir/ssh"
+    for cmd in grep awk cut head tr; do
+        local cmd_path
+        cmd_path=$(command -v "$cmd" 2>/dev/null) && ln -sf "$cmd_path" "$mock_dir/$cmd"
+    done
+
+    local test_script
+    test_script=$(_create_ts_test_script "$mock_dir" "test-external-host")
+
+    run bash "$test_script"
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_tailscale_host uses tailscale whois when CLI available and daemon running
+@test "is_tailscale_host: uses tailscale whois when available" {
+    command -v jq >/dev/null 2>&1 || skip "jq not available"
+
+    local mock_dir
+    mock_dir=$(mktemp -d "$TEST_CONFIG_DIR/ts_mock.XXXXXX")
+
+    cat > "$mock_dir/ssh" <<'MOCK_SSH'
+#!/bin/bash
+echo "hostname myhost.example.com"
+MOCK_SSH
+    chmod +x "$mock_dir/ssh"
+
+    cat > "$mock_dir/tailscale" <<'MOCK_TS'
+#!/bin/bash
+if [ "$1" = "status" ]; then
+    exit 0
+fi
+if [ "$1" = "whois" ] && [ "$2" = "--json" ]; then
+    echo '{"Node":{"ID":12345,"Name":"myhost"}}'
+    exit 0
+fi
+exit 1
+MOCK_TS
+    chmod +x "$mock_dir/tailscale"
+
+    for cmd in jq grep awk cut head tr; do
+        local cmd_path
+        cmd_path=$(command -v "$cmd" 2>/dev/null) && ln -sf "$cmd_path" "$mock_dir/$cmd"
+    done
+
+    local test_script
+    test_script=$(_create_ts_test_script "$mock_dir" "test-ts-host")
+
+    run bash "$test_script"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_tailscale_host falls back when daemon not running
+@test "is_tailscale_host: fallback when daemon not running" {
+    local mock_dir
+    mock_dir=$(mktemp -d "$TEST_CONFIG_DIR/ts_mock.XXXXXX")
+
+    cat > "$mock_dir/ssh" <<'MOCK_SSH'
+#!/bin/bash
+echo "hostname myhost.tail12345.ts.net"
+MOCK_SSH
+    chmod +x "$mock_dir/ssh"
+
+    cat > "$mock_dir/tailscale" <<'MOCK_TS'
+#!/bin/bash
+if [ "$1" = "status" ]; then
+    echo "failed to connect to local Tailscale daemon" >&2
+    exit 1
+fi
+exit 1
+MOCK_TS
+    chmod +x "$mock_dir/tailscale"
+    for cmd in grep awk cut head tr; do
+        local cmd_path
+        cmd_path=$(command -v "$cmd" 2>/dev/null) && ln -sf "$cmd_path" "$mock_dir/$cmd"
+    done
+
+    local test_script
+    test_script=$(_create_ts_test_script "$mock_dir" "test-ts-host")
+
+    run bash "$test_script"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_tailscale_host rejects non-tailscale host via whois
+@test "is_tailscale_host: whois returns non-tailscale host" {
+    local mock_dir
+    mock_dir=$(mktemp -d "$TEST_CONFIG_DIR/ts_mock.XXXXXX")
+
+    cat > "$mock_dir/ssh" <<'MOCK_SSH'
+#!/bin/bash
+echo "hostname 203.0.113.1"
+MOCK_SSH
+    chmod +x "$mock_dir/ssh"
+
+    cat > "$mock_dir/tailscale" <<'MOCK_TS'
+#!/bin/bash
+if [ "$1" = "status" ]; then
+    exit 0
+fi
+if [ "$1" = "whois" ]; then
+    echo "not a Tailscale IP" >&2
+    exit 1
+fi
+exit 1
+MOCK_TS
+    chmod +x "$mock_dir/tailscale"
+    for cmd in grep awk cut head tr; do
+        local cmd_path
+        cmd_path=$(command -v "$cmd" 2>/dev/null) && ln -sf "$cmd_path" "$mock_dir/$cmd"
+    done
+
+    local test_script
+    test_script=$(_create_ts_test_script "$mock_dir" "test-external-host")
+
+    run bash "$test_script"
+    [ "$status" -eq 1 ]
 }
