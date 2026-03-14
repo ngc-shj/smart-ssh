@@ -15,6 +15,16 @@ DEFAULT_HOME_GATEWAY_MAC=""
 DEFAULT_SECURITY_KEY_PATH="$HOME/.ssh/id_ed25519_sk"
 DEFAULT_TAILSCALE_AS_HOME="true"
 DEFAULT_LOG_LEVEL="info"
+DEFAULT_OIDC_ENABLED="false"
+DEFAULT_OIDC_ISSUER=""
+DEFAULT_OIDC_CLIENT_ID=""
+DEFAULT_OIDC_SCOPES="openid email"
+DEFAULT_OIDC_CA_URL=""
+DEFAULT_OIDC_CA_PROVISIONER="oidc"
+DEFAULT_OIDC_CA_MODE="api"
+DEFAULT_OIDC_CERT_LIFETIME="3600"
+DEFAULT_OIDC_CERT_DIR="$HOME/.ssh/oidc-certs"
+DEFAULT_OIDC_AUTH_MODE="auto"
 
 # Load configuration from file if it exists
 load_config() {
@@ -51,6 +61,16 @@ load_config() {
                 LOG_LEVEL)
                     CONFIG_LOG_LEVEL="$value"
                     ;;
+                OIDC_ENABLED) CONFIG_OIDC_ENABLED="$value" ;;
+                OIDC_ISSUER) CONFIG_OIDC_ISSUER="$value" ;;
+                OIDC_CLIENT_ID) CONFIG_OIDC_CLIENT_ID="$value" ;;
+                OIDC_SCOPES) CONFIG_OIDC_SCOPES="$value" ;;
+                OIDC_CA_URL) CONFIG_OIDC_CA_URL="$value" ;;
+                OIDC_CA_PROVISIONER) CONFIG_OIDC_CA_PROVISIONER="$value" ;;
+                OIDC_CA_MODE) CONFIG_OIDC_CA_MODE="$value" ;;
+                OIDC_CERT_LIFETIME) CONFIG_OIDC_CERT_LIFETIME="$value" ;;
+                OIDC_CERT_DIR) CONFIG_OIDC_CERT_DIR="$value" ;;
+                OIDC_AUTH_MODE) CONFIG_OIDC_AUTH_MODE="$value" ;;
             esac
         done < "$CONFIG_FILE"
     fi
@@ -72,6 +92,19 @@ SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-${CONFIG_SECURITY_KEY_PATH:-$DEFAULT_SEC
 SECURITY_KEY_PATH="${SECURITY_KEY_PATH/#\~/$HOME}"
 # Log level
 LOG_LEVEL="${LOG_LEVEL:-${CONFIG_LOG_LEVEL:-$DEFAULT_LOG_LEVEL}}"
+# OIDC settings
+OIDC_ENABLED="${OIDC_ENABLED:-${CONFIG_OIDC_ENABLED:-$DEFAULT_OIDC_ENABLED}}"
+OIDC_ISSUER="${OIDC_ISSUER:-${CONFIG_OIDC_ISSUER:-$DEFAULT_OIDC_ISSUER}}"
+OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-${CONFIG_OIDC_CLIENT_ID:-$DEFAULT_OIDC_CLIENT_ID}}"
+OIDC_SCOPES="${OIDC_SCOPES:-${CONFIG_OIDC_SCOPES:-$DEFAULT_OIDC_SCOPES}}"
+OIDC_CA_URL="${OIDC_CA_URL:-${CONFIG_OIDC_CA_URL:-$DEFAULT_OIDC_CA_URL}}"
+OIDC_CA_PROVISIONER="${OIDC_CA_PROVISIONER:-${CONFIG_OIDC_CA_PROVISIONER:-$DEFAULT_OIDC_CA_PROVISIONER}}"
+OIDC_CA_MODE="${OIDC_CA_MODE:-${CONFIG_OIDC_CA_MODE:-$DEFAULT_OIDC_CA_MODE}}"
+OIDC_CERT_LIFETIME="${OIDC_CERT_LIFETIME:-${CONFIG_OIDC_CERT_LIFETIME:-$DEFAULT_OIDC_CERT_LIFETIME}}"
+OIDC_CERT_DIR="${OIDC_CERT_DIR:-${CONFIG_OIDC_CERT_DIR:-$DEFAULT_OIDC_CERT_DIR}}"
+# Expand ~ in OIDC_CERT_DIR
+OIDC_CERT_DIR="${OIDC_CERT_DIR/#\~/$HOME}"
+OIDC_AUTH_MODE="${OIDC_AUTH_MODE:-${CONFIG_OIDC_AUTH_MODE:-$DEFAULT_OIDC_AUTH_MODE}}"
 
 # Color output support (respects NO_COLOR environment variable)
 if [ -t 1 ] && [ -z "${NO_COLOR}" ]; then
@@ -179,6 +212,7 @@ usage() {
     echo ""
     echo "Smart-SSH Options:"
     echo "  --security-key, -s   Force security key authentication"
+    echo "  --oidc               Force OIDC Device Flow authentication (no fallback)"
     echo "  --dry-run, -n        Show what would be executed without connecting"
     echo "  --init-config        Create default configuration file"
     echo "  --debug, -d          Show debug information"
@@ -238,6 +272,51 @@ SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
 # Log level (debug, info, warn, error)
 # Default: info
 LOG_LEVEL=info
+
+# OIDC Device Flow authentication
+# Enable OIDC Device Flow for certificate-based SSH authentication (true/false)
+# Default: false
+#OIDC_ENABLED=false
+
+# OIDC issuer URL (must use https://)
+# Example: OIDC_ISSUER=https://accounts.example.com
+#OIDC_ISSUER=
+
+# OIDC client ID registered with the issuer
+# Example: OIDC_CLIENT_ID=smart-ssh-cli
+#OIDC_CLIENT_ID=
+
+# OIDC scopes (space-separated)
+# Default: openid email
+#OIDC_SCOPES=openid email
+
+# CA server URL for SSH certificate signing (must use https://)
+# Example: OIDC_CA_URL=https://ca.example.com
+#OIDC_CA_URL=
+
+# CA provisioner name for OIDC
+# Default: oidc
+#OIDC_CA_PROVISIONER=oidc
+
+# CA mode: "api" (curl direct) - "step" is future work
+# Default: api
+#OIDC_CA_MODE=api
+
+# Certificate lifetime in seconds
+# Default: 3600
+#OIDC_CERT_LIFETIME=3600
+
+# Directory to cache OIDC certificates and keys
+# Default: ~/.ssh/oidc-certs
+#OIDC_CERT_DIR=~/.ssh/oidc-certs
+
+# OIDC authentication mode: auto|prefer|only|disabled
+#   auto     - use OIDC when sk key file is absent; no fallback on failure
+#   prefer   - prefer OIDC; fall back to sk key on network/CA error (exit 2) only
+#   only     - OIDC only; no fallback
+#   disabled - OIDC disabled
+# Default: auto
+#OIDC_AUTH_MODE=auto
 EOF
 
     print_success "Configuration file created: $CONFIG_FILE"
@@ -551,6 +630,481 @@ is_tailscale_host() {
     return 1
 }
 
+# Check required dependencies for OIDC Device Flow
+check_oidc_dependencies() {
+    local missing=()
+
+    if ! command -v jq >/dev/null 2>&1; then
+        missing+=("jq")
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        missing+=("curl")
+    fi
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        log_error "OIDC requires missing dependencies: ${missing[*]}"
+        log_error "Install them and try again."
+        return 1
+    fi
+    return 0
+}
+
+# Validate that OIDC_ISSUER and OIDC_CA_URL use https:// scheme
+validate_oidc_urls() {
+    if [ -z "$OIDC_ISSUER" ] || [[ "$OIDC_ISSUER" != https://* ]]; then
+        log_error "OIDC_ISSUER must be set and start with https:// (got: '${OIDC_ISSUER}')"
+        return 1
+    fi
+    if [ -z "$OIDC_CA_URL" ] || [[ "$OIDC_CA_URL" != https://* ]]; then
+        log_error "OIDC_CA_URL must be set and start with https:// (got: '${OIDC_CA_URL}')"
+        return 1
+    fi
+    return 0
+}
+
+# Fetch OIDC discovery document and extract device/token endpoints
+# Sets globals: _OIDC_DEVICE_ENDPOINT, _OIDC_TOKEN_ENDPOINT
+oidc_discover() {
+    local issuer="$1"
+    local discovery_url="${issuer%/}/.well-known/openid-configuration"
+
+    log_debug "OIDC discovery: $discovery_url"
+
+    local response
+    response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+        "$discovery_url" 2>&1)
+    if [ $? -ne 0 ]; then
+        log_error "OIDC discovery request failed: $response"
+        return 2
+    fi
+
+    # Validate JSON and extract required fields
+    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        log_error "OIDC discovery returned malformed JSON"
+        return 2
+    fi
+
+    local device_endpoint token_endpoint
+    device_endpoint=$(echo "$response" | jq -r '.device_authorization_endpoint // empty')
+    token_endpoint=$(echo "$response" | jq -r '.token_endpoint // empty')
+
+    if [ -z "$device_endpoint" ]; then
+        log_error "OIDC discovery missing device_authorization_endpoint"
+        return 2
+    fi
+    if [ -z "$token_endpoint" ]; then
+        log_error "OIDC discovery missing token_endpoint"
+        return 2
+    fi
+
+    # Extract origin (scheme://host:port) from issuer for Token Relay attack prevention
+    # Strip path and trailing slash to get scheme://host[:port]
+    local issuer_origin
+    issuer_origin=$(echo "$issuer" | sed -E 's|^(https?://[^/]+).*|\1|')
+
+    # Validate that endpoints belong to the same origin as the issuer
+    if [[ "$device_endpoint" != "${issuer_origin}"/* ]] && [ "$device_endpoint" != "$issuer_origin" ]; then
+        log_error "device_authorization_endpoint origin mismatch: expected $issuer_origin, got $device_endpoint"
+        return 2
+    fi
+    if [[ "$token_endpoint" != "${issuer_origin}"/* ]] && [ "$token_endpoint" != "$issuer_origin" ]; then
+        log_error "token_endpoint origin mismatch: expected $issuer_origin, got $token_endpoint"
+        return 2
+    fi
+
+    _OIDC_DEVICE_ENDPOINT="$device_endpoint"
+    _OIDC_TOKEN_ENDPOINT="$token_endpoint"
+    log_debug "device_authorization_endpoint: $_OIDC_DEVICE_ENDPOINT"
+    log_debug "token_endpoint: $_OIDC_TOKEN_ENDPOINT"
+    return 0
+}
+
+# Send Device Authorization Request and display user_code + verification_uri
+# Sets globals: _OIDC_DEVICE_CODE, _OIDC_USER_CODE, _OIDC_VERIFICATION_URI,
+#               _OIDC_EXPIRES_IN, _OIDC_POLL_INTERVAL
+oidc_device_authorize() {
+    local response
+    response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+        -X POST "$_OIDC_DEVICE_ENDPOINT" \
+        -d "client_id=${OIDC_CLIENT_ID}" \
+        -d "scope=${OIDC_SCOPES}" 2>&1)
+    if [ $? -ne 0 ]; then
+        log_error "Device authorization request failed: $response"
+        return 2
+    fi
+
+    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        log_error "Device authorization returned malformed JSON"
+        return 2
+    fi
+
+    _OIDC_DEVICE_CODE=$(echo "$response" | jq -r '.device_code // empty')
+    _OIDC_USER_CODE=$(echo "$response" | jq -r '.user_code // empty')
+    _OIDC_VERIFICATION_URI=$(echo "$response" | jq -r '.verification_uri // empty')
+    _OIDC_EXPIRES_IN=$(echo "$response" | jq -r '.expires_in // 300')
+    _OIDC_POLL_INTERVAL=$(echo "$response" | jq -r '.interval // 5')
+
+    if [ -z "$_OIDC_DEVICE_CODE" ] || [ -z "$_OIDC_USER_CODE" ] || [ -z "$_OIDC_VERIFICATION_URI" ]; then
+        log_error "Device authorization response missing required fields"
+        return 2
+    fi
+
+    echo ""
+    print_info "=== OIDC Device Authentication ==="
+    print_info "Open this URL in your browser:"
+    print_info "  $_OIDC_VERIFICATION_URI"
+    print_info ""
+    print_info "Enter this code: $_OIDC_USER_CODE"
+    print_info "=================================="
+    echo ""
+    return 0
+}
+
+# Poll token endpoint until access granted, error, or timeout (RFC 8628)
+# Sets global: _OIDC_ID_TOKEN
+# Returns: 0 on success, 2 on network error, 3 on access_denied/expired_token/timeout
+oidc_poll_token() {
+    # Allow test overrides; minimum enforced interval is 5 seconds
+    local server_interval="${_OIDC_POLL_INTERVAL:-5}"
+    local current_interval
+    # Enforce client-side minimum of 5 seconds
+    if [ "$server_interval" -lt 5 ] 2>/dev/null; then
+        current_interval=5
+    else
+        current_interval="$server_interval"
+    fi
+
+    local expires_in="${_OIDC_EXPIRES_IN:-300}"
+    local timeout="${_OIDC_POLL_TIMEOUT_OVERRIDE:-$expires_in}"
+    local elapsed=0
+
+    # _OIDC_POLL_TIMEOUT_OVERRIDE=0 means immediate timeout
+    if [ "$timeout" -eq 0 ] 2>/dev/null; then
+        log_error "OIDC polling timed out waiting for authorization"
+        return 3
+    fi
+
+    log_info "Waiting for authorization (timeout: ${timeout}s)..."
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        local sleep_time="${_OIDC_POLL_INTERVAL_OVERRIDE:-$current_interval}"
+
+        sleep "$sleep_time"
+        elapsed=$((elapsed + sleep_time))
+
+        local response
+        response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+            -X POST "$_OIDC_TOKEN_ENDPOINT" \
+            -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+            -d "device_code=${_OIDC_DEVICE_CODE}" \
+            -d "client_id=${OIDC_CLIENT_ID}" 2>&1)
+        local curl_exit=$?
+
+        # Network-level error
+        if [ $curl_exit -ne 0 ]; then
+            log_error "Token poll request failed: $response"
+            return 2
+        fi
+
+        if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+            log_error "Token endpoint returned malformed JSON"
+            return 2
+        fi
+
+        local error id_token
+        error=$(echo "$response" | jq -r '.error // empty')
+        id_token=$(echo "$response" | jq -r '.id_token // empty')
+
+        if [ -z "$error" ] && [ -n "$id_token" ]; then
+            _OIDC_ID_TOKEN="$id_token"
+            log_debug "ID token obtained (length: ${#id_token})"
+            return 0
+        fi
+
+        case "$error" in
+            authorization_pending)
+                log_debug "Authorization pending, retrying in ${current_interval}s..."
+                ;;
+            slow_down)
+                current_interval=$((current_interval + 5))
+                log_debug "Server requested slow_down, new interval: ${current_interval}s"
+                ;;
+            access_denied)
+                log_error "OIDC authorization denied by user"
+                return 3
+                ;;
+            expired_token)
+                log_error "OIDC device code expired"
+                return 3
+                ;;
+            "")
+                # No error but also no id_token; treat as pending
+                log_debug "Token response missing both error and id_token, retrying..."
+                ;;
+            *)
+                log_error "OIDC token error: $error"
+                return 3
+                ;;
+        esac
+    done
+
+    log_error "OIDC polling timed out waiting for authorization"
+    return 3
+}
+
+# Send ID token to CA API and save certificate + key files
+# Reads _OIDC_ID_TOKEN; writes OIDC_CERT_DIR/id_oidc-cert.pub and id_oidc
+oidc_get_certificate() {
+    local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
+    local key_file="${OIDC_CERT_DIR}/id_oidc"
+    # CA endpoint: use OIDC_CA_URL as-is (user specifies full path)
+    local ca_endpoint="${OIDC_CA_URL%/}/ssh/sign"
+
+    log_debug "Requesting SSH certificate from CA: $ca_endpoint"
+
+    # Generate a new ephemeral key pair for the certificate
+    local temp_key
+    temp_key=$(umask 077 && mktemp)
+    trap 'rm -f "$temp_key" "${temp_key}.pub"' RETURN
+
+    if ! ssh-keygen -t ed25519 -f "$temp_key" -N "" -q 2>&1; then
+        log_error "Failed to generate ephemeral key pair"
+        return 2
+    fi
+
+    local pub_key
+    pub_key=$(cat "${temp_key}.pub")
+
+    # Send ID token via stdin to avoid cmdline exposure
+    local response
+    response=$(printf 'Authorization: Bearer %s' "$_OIDC_ID_TOKEN" | \
+        curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+        -X POST "$ca_endpoint" \
+        -H @- \
+        -H "Content-Type: application/json" \
+        -d "{\"publicKey\":\"${pub_key}\",\"certType\":\"user\",\"provisioner\":\"${OIDC_CA_PROVISIONER}\",\"validAfter\":\"\",\"validBefore\":\"+${OIDC_CERT_LIFETIME}s\"}" 2>&1)
+    local curl_exit=$?
+
+    if [ $curl_exit -ne 0 ]; then
+        log_error "CA certificate request failed: $response"
+        return 2
+    fi
+
+    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        log_error "CA returned malformed JSON"
+        return 2
+    fi
+
+    local cert
+    cert=$(echo "$response" | jq -r '.crt // empty')
+    if [ -z "$cert" ]; then
+        log_error "CA response missing certificate (crt field)"
+        return 2
+    fi
+
+    # Save certificate and private key with secure permissions
+    (umask 077 && printf '%s\n' "$cert" > "$cert_file") || {
+        log_error "Failed to write certificate file: $cert_file"
+        return 2
+    }
+    (umask 077 && cp "$temp_key" "$key_file") || {
+        log_error "Failed to write key file: $key_file"
+        return 2
+    }
+    chmod 600 "$cert_file" "$key_file"
+
+    log_debug "Certificate saved: $cert_file"
+    log_debug "Key saved: $key_file"
+    return 0
+}
+
+# Check if a valid cached certificate and its corresponding key exist
+# Returns 0 if both exist and certificate has not expired
+oidc_check_cached_cert() {
+    local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
+    local key_file="${OIDC_CERT_DIR}/id_oidc"
+
+    if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+        log_debug "No cached OIDC certificate or key found"
+        return 1
+    fi
+
+    # Extract validity end time from certificate
+    local valid_to_str
+    valid_to_str=$(ssh-keygen -L -f "$cert_file" 2>/dev/null | grep "Valid:" | sed 's/.*to //')
+    if [ -z "$valid_to_str" ]; then
+        log_debug "Cannot parse certificate validity"
+        return 1
+    fi
+
+    # Convert to epoch seconds (macOS vs Linux)
+    local valid_to_epoch
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        valid_to_epoch=$(date -jf "%Y-%m-%dT%H:%M:%S" "$valid_to_str" "+%s" 2>/dev/null)
+    else
+        valid_to_epoch=$(date -d "$valid_to_str" "+%s" 2>/dev/null)
+    fi
+
+    if [ -z "$valid_to_epoch" ]; then
+        log_debug "Cannot convert certificate expiry to epoch: '$valid_to_str'"
+        return 1
+    fi
+
+    local now_epoch
+    now_epoch=$(date "+%s")
+
+    if [ "$now_epoch" -lt "$valid_to_epoch" ]; then
+        log_debug "Cached certificate is valid (expires at $valid_to_str)"
+        return 0
+    fi
+
+    log_debug "Cached certificate has expired (expired at $valid_to_str)"
+    return 1
+}
+
+# Create certificate directory with secure permissions
+# Creates ~/.ssh/ if needed (chmod 700), then OIDC_CERT_DIR (chmod 700)
+# Verifies no symlinks in the path
+ensure_oidc_cert_dir() {
+    local ssh_dir="$HOME/.ssh"
+
+    # Create ~/.ssh if it does not exist
+    if [ ! -e "$ssh_dir" ]; then
+        mkdir -m 700 "$ssh_dir" || {
+            log_error "Failed to create $ssh_dir"
+            return 1
+        }
+    fi
+
+    # Reject symlinks for security
+    if [ -L "$ssh_dir" ]; then
+        log_error "Security error: $ssh_dir is a symlink"
+        return 1
+    fi
+
+    # Create OIDC cert directory
+    if [ ! -e "$OIDC_CERT_DIR" ]; then
+        mkdir -m 700 "$OIDC_CERT_DIR" || {
+            log_error "Failed to create OIDC cert directory: $OIDC_CERT_DIR"
+            return 1
+        }
+    fi
+
+    if [ -L "$OIDC_CERT_DIR" ]; then
+        log_error "Security error: $OIDC_CERT_DIR is a symlink"
+        return 1
+    fi
+
+    if [ ! -d "$OIDC_CERT_DIR" ]; then
+        log_error "OIDC_CERT_DIR exists but is not a directory: $OIDC_CERT_DIR"
+        return 1
+    fi
+
+    return 0
+}
+
+# Determine whether OIDC should be used for the current connection
+should_use_oidc() {
+    [ "$FORCE_OIDC" = true ] && return 0
+    [ "$OIDC_ENABLED" = "true" ] || return 1
+    case "$OIDC_AUTH_MODE" in
+        only|prefer) return 0 ;;
+        auto) [ ! -f "$SECURITY_KEY_PATH" ] && return 0; return 1 ;;
+        disabled|*) return 1 ;;
+    esac
+}
+
+# Connect using OIDC Device Flow certificate authentication
+ssh_with_oidc() {
+    local hostname="$1"
+    local dry_run="${2:-false}"
+    shift 2
+    local ssh_options=("$@")
+
+    local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
+    local key_file="${OIDC_CERT_DIR}/id_oidc"
+
+    # 1. Check prerequisites
+    check_oidc_dependencies || return 1
+    validate_oidc_urls || return 1
+
+    # 2. Prepare certificate directory
+    ensure_oidc_cert_dir || return 1
+
+    # 3. Use cached certificate if still valid
+    if oidc_check_cached_cert; then
+        log_info "Using cached OIDC certificate"
+    else
+        # 4. Run OIDC Device Flow
+        oidc_discover "$OIDC_ISSUER" || return 2
+        oidc_device_authorize || return 2
+        oidc_poll_token || return $?
+        oidc_get_certificate || return 2
+        log_info "SSH certificate obtained successfully"
+    fi
+
+    # 5. Build temporary SSH config and connect
+    local temp_config
+    temp_config=$(umask 077 && mktemp) || return 1
+    trap 'rm -f "$temp_config"' RETURN INT TERM
+
+    # Check if ProxyJump is configured
+    local proxy_jump
+    proxy_jump=$(ssh -G "$hostname" 2>/dev/null | grep "^proxyjump " | awk '{print $2}')
+
+    if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
+        log_debug "ProxyJump detected for OIDC: $proxy_jump"
+        echo "Host $proxy_jump" >> "$temp_config"
+        ssh -G "$proxy_jump" 2>/dev/null | \
+            grep -E "^(hostname|port|user) " | \
+            awk '{print "    " $1 " " $2}' >> "$temp_config"
+        echo "    IdentityFile $key_file" >> "$temp_config"
+        echo "    CertificateFile $cert_file" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+        echo "" >> "$temp_config"
+
+        echo "Host $hostname" >> "$temp_config"
+        ssh -G "$hostname" 2>/dev/null | \
+            grep -E "^(hostname|port|user|proxyjump|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
+            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        echo "    IdentityFile $key_file" >> "$temp_config"
+        echo "    CertificateFile $cert_file" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+    else
+        echo "Host $hostname" >> "$temp_config"
+        ssh -G "$hostname" 2>/dev/null | \
+            grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
+            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        echo "    IdentityFile $key_file" >> "$temp_config"
+        echo "    CertificateFile $cert_file" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+    fi
+
+    if [ "$dry_run" = true ]; then
+        if [ ${#ssh_options[@]} -gt 0 ]; then
+            print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
+        else
+            print_info "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
+        fi
+        print_info "[DRY RUN] Temporary SSH config:"
+        while IFS= read -r line; do
+            print_info "  $line"
+        done < "$temp_config"
+        return 0
+    fi
+
+    if [ ${#ssh_options[@]} -gt 0 ]; then
+        log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
+        ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
+    else
+        log_debug "Executing: ssh -F $temp_config $hostname"
+        ssh -F "$temp_config" "$hostname"
+    fi
+}
+
 # Check SSH configuration exists (single host entry)
 check_ssh_config() {
     local hostname="$1"
@@ -730,6 +1284,7 @@ main() {
     local hostname=""
     local force_security_key=false
     local dry_run=false
+    FORCE_OIDC=false
     local ssh_options=()
 
     # Parse arguments
@@ -754,6 +1309,10 @@ main() {
             --help|-h)
                 usage
                 exit 0
+                ;;
+            --oidc)
+                FORCE_OIDC=true
+                shift
                 ;;
             --)
                 # End of smart-ssh options, rest are SSH options
@@ -805,6 +1364,17 @@ main() {
     if [ "$force_security_key" = true ]; then
         print_warning "Security key authentication forced by --security-key option"
         ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
+        return
+    fi
+
+    # Force OIDC if requested (skip network detection)
+    if [ "$FORCE_OIDC" = true ]; then
+        print_warning "OIDC authentication forced by --oidc option"
+        ssh_with_oidc "$hostname" "$dry_run" "${ssh_options[@]}" || {
+            local oidc_exit_code=$?
+            log_error "OIDC authentication failed (exit $oidc_exit_code)"
+            exit "$oidc_exit_code"
+        }
         return
     fi
 
@@ -892,7 +1462,28 @@ main() {
         ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}"
     else
         print_warning "External network detected ($detection_method: $detected_value)"
-        ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
+        if should_use_oidc; then
+            local oidc_exit_code=0
+            ssh_with_oidc "$hostname" "$dry_run" "${ssh_options[@]}" || oidc_exit_code=$?
+
+            if [ "$oidc_exit_code" -ne 0 ]; then
+                # --oidc / only / auto: no fallback
+                if [ "$FORCE_OIDC" = true ] || [ "$OIDC_AUTH_MODE" = "only" ] || [ "$OIDC_AUTH_MODE" = "auto" ]; then
+                    log_error "OIDC authentication failed (exit $oidc_exit_code)"
+                    exit "$oidc_exit_code"
+                fi
+                # prefer: fall back to sk key only on network/CA error (exit 2)
+                if [ "$OIDC_AUTH_MODE" = "prefer" ] && [ "$oidc_exit_code" -eq 2 ]; then
+                    log_warn "OIDC network/CA error, falling back to security key"
+                    ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
+                else
+                    log_error "OIDC authentication failed (exit $oidc_exit_code)"
+                    exit "$oidc_exit_code"
+                fi
+            fi
+        else
+            ssh_from_away "$hostname" "$dry_run" "${ssh_options[@]}"
+        fi
     fi
 }
 
@@ -928,6 +1519,33 @@ debug_info() {
         ifconfig | grep -E "(flags=|inet )" | grep -A1 "UP," | grep "inet "
     fi
     
+    echo ""
+    echo "OIDC:"
+    echo "  OIDC_ENABLED: $OIDC_ENABLED"
+    echo "  OIDC_ISSUER: ${OIDC_ISSUER:-<not configured>}"
+    # Mask client ID: show first 8 chars only
+    if [ -n "$OIDC_CLIENT_ID" ]; then
+        echo "  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:0:8}..."
+    else
+        echo "  OIDC_CLIENT_ID: <not configured>"
+    fi
+    echo "  OIDC_CA_URL: ${OIDC_CA_URL:-<not configured>}"
+    echo "  OIDC_AUTH_MODE: $OIDC_AUTH_MODE"
+    echo "  OIDC_CERT_DIR: $OIDC_CERT_DIR"
+    # Show cached certificate status
+    local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
+    local key_file="${OIDC_CERT_DIR}/id_oidc"
+    if [ -f "$cert_file" ] && [ -f "$key_file" ]; then
+        if oidc_check_cached_cert 2>/dev/null; then
+            echo "  Cached certificate: present (valid)"
+        else
+            echo "  Cached certificate: present (expired)"
+        fi
+    else
+        echo "  Cached certificate: none"
+    fi
+    echo "  jq available: $(command -v jq >/dev/null 2>&1 && echo "Yes" || echo "No")"
+    echo "  ID token: (never shown)"
     echo ""
     echo "SSH configuration check:"
     if [ -f ~/.ssh/config ]; then
@@ -974,6 +1592,9 @@ case "$1" in
         ;;
     --help|-h|"")
         usage
+        ;;
+    --oidc)
+        main "$@"
         ;;
     *)
         main "$@"

@@ -50,7 +50,7 @@ _smart_ssh_completion() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # Smart-ssh specific options
-    local smart_ssh_opts="--security-key -s --dry-run -n --init-config --debug -d --help -h --"
+    local smart_ssh_opts="--security-key -s --dry-run -n --oidc --init-config --debug -d --help -h --"
 
     # Common SSH options for pass-through
     local ssh_opts="-v -p -L -R -D -i -o -F -J -W -N -T -f -q -V -4 -6"
@@ -92,7 +92,7 @@ _smart_ssh_completion() {
 
     # Handle smart-ssh options
     case "${prev}" in
-        --security-key|-s|--dry-run|-n)
+        --security-key|-s|--dry-run|-n|--oidc)
             # These can be followed by hostname
             if [[ -f ~/.ssh/config ]]; then
                 hosts=$(_smart_ssh_get_hosts)
