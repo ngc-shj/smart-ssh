@@ -18,6 +18,7 @@ DEFAULT_LOG_LEVEL="info"
 DEFAULT_OIDC_ENABLED="false"
 DEFAULT_OIDC_ISSUER=""
 DEFAULT_OIDC_CLIENT_ID=""
+DEFAULT_OIDC_CLIENT_SECRET=""
 DEFAULT_OIDC_SCOPES="openid email"
 DEFAULT_OIDC_CA_URL=""
 DEFAULT_OIDC_CA_PROVISIONER="oidc"
@@ -64,6 +65,7 @@ load_config() {
                 OIDC_ENABLED) CONFIG_OIDC_ENABLED="$value" ;;
                 OIDC_ISSUER) CONFIG_OIDC_ISSUER="$value" ;;
                 OIDC_CLIENT_ID) CONFIG_OIDC_CLIENT_ID="$value" ;;
+                OIDC_CLIENT_SECRET) CONFIG_OIDC_CLIENT_SECRET="$value" ;;
                 OIDC_SCOPES) CONFIG_OIDC_SCOPES="$value" ;;
                 OIDC_CA_URL) CONFIG_OIDC_CA_URL="$value" ;;
                 OIDC_CA_PROVISIONER) CONFIG_OIDC_CA_PROVISIONER="$value" ;;
@@ -96,6 +98,7 @@ LOG_LEVEL="${LOG_LEVEL:-${CONFIG_LOG_LEVEL:-$DEFAULT_LOG_LEVEL}}"
 OIDC_ENABLED="${OIDC_ENABLED:-${CONFIG_OIDC_ENABLED:-$DEFAULT_OIDC_ENABLED}}"
 OIDC_ISSUER="${OIDC_ISSUER:-${CONFIG_OIDC_ISSUER:-$DEFAULT_OIDC_ISSUER}}"
 OIDC_CLIENT_ID="${OIDC_CLIENT_ID:-${CONFIG_OIDC_CLIENT_ID:-$DEFAULT_OIDC_CLIENT_ID}}"
+OIDC_CLIENT_SECRET="${OIDC_CLIENT_SECRET:-${CONFIG_OIDC_CLIENT_SECRET:-$DEFAULT_OIDC_CLIENT_SECRET}}"
 OIDC_SCOPES="${OIDC_SCOPES:-${CONFIG_OIDC_SCOPES:-$DEFAULT_OIDC_SCOPES}}"
 OIDC_CA_URL="${OIDC_CA_URL:-${CONFIG_OIDC_CA_URL:-$DEFAULT_OIDC_CA_URL}}"
 OIDC_CA_PROVISIONER="${OIDC_CA_PROVISIONER:-${CONFIG_OIDC_CA_PROVISIONER:-$DEFAULT_OIDC_CA_PROVISIONER}}"
@@ -285,6 +288,9 @@ LOG_LEVEL=info
 # OIDC client ID registered with the issuer
 # Example: OIDC_CLIENT_ID=smart-ssh-cli
 #OIDC_CLIENT_ID=
+
+# OIDC client secret (required by some providers like Google)
+#OIDC_CLIENT_SECRET=
 
 # OIDC scopes (space-separated)
 # Default: openid email
@@ -697,18 +703,15 @@ oidc_discover() {
         return 2
     fi
 
-    # Extract origin (scheme://host:port) from issuer for Token Relay attack prevention
-    # Strip path and trailing slash to get scheme://host[:port]
-    local issuer_origin
-    issuer_origin=$(echo "$issuer" | sed -E 's|^(https?://[^/]+).*|\1|')
-
-    # Validate that endpoints belong to the same origin as the issuer
-    if [[ "$device_endpoint" != "${issuer_origin}"/* ]] && [ "$device_endpoint" != "$issuer_origin" ]; then
-        log_error "device_authorization_endpoint origin mismatch: expected $issuer_origin, got $device_endpoint"
+    # Validate that endpoints use https:// scheme
+    # Note: Same-origin check is not enforced because major providers (Google, Microsoft)
+    # use different subdomains for their endpoints (e.g., oauth2.googleapis.com)
+    if [[ "$device_endpoint" != https://* ]]; then
+        log_error "device_authorization_endpoint must use https://: $device_endpoint"
         return 2
     fi
-    if [[ "$token_endpoint" != "${issuer_origin}"/* ]] && [ "$token_endpoint" != "$issuer_origin" ]; then
-        log_error "token_endpoint origin mismatch: expected $issuer_origin, got $token_endpoint"
+    if [[ "$token_endpoint" != https://* ]]; then
+        log_error "token_endpoint must use https://: $token_endpoint"
         return 2
     fi
 
@@ -740,7 +743,8 @@ oidc_device_authorize() {
 
     _OIDC_DEVICE_CODE=$(echo "$response" | jq -r '.device_code // empty')
     _OIDC_USER_CODE=$(echo "$response" | jq -r '.user_code // empty')
-    _OIDC_VERIFICATION_URI=$(echo "$response" | jq -r '.verification_uri // empty')
+    # Google uses "verification_url" instead of RFC 8628 "verification_uri"
+    _OIDC_VERIFICATION_URI=$(echo "$response" | jq -r '.verification_uri // .verification_url // empty')
     _OIDC_EXPIRES_IN=$(echo "$response" | jq -r '.expires_in // 300')
     _OIDC_POLL_INTERVAL=$(echo "$response" | jq -r '.interval // 5')
 
@@ -802,7 +806,8 @@ oidc_poll_token() {
             -X POST "$_OIDC_TOKEN_ENDPOINT" \
             --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
             --data-urlencode "device_code=${_OIDC_DEVICE_CODE}" \
-            --data-urlencode "client_id=${OIDC_CLIENT_ID}" 2>&1)
+            --data-urlencode "client_id=${OIDC_CLIENT_ID}" \
+            ${OIDC_CLIENT_SECRET:+--data-urlencode "client_secret=${OIDC_CLIENT_SECRET}"} 2>&1)
         local curl_exit=$?
 
         # Network-level error (curl itself failed)
@@ -887,6 +892,7 @@ oidc_get_certificate() {
     # NOTE: Do not use 'trap RETURN' here - it would override the caller's trap
     local temp_key
     temp_key=$(umask 077 && mktemp)
+    rm -f "$temp_key"  # ssh-keygen needs non-existent file
 
     if ! ssh-keygen -t ed25519 -f "$temp_key" -N "" -q >/dev/null 2>&1; then
         log_error "Failed to generate ephemeral key pair"
@@ -894,33 +900,44 @@ oidc_get_certificate() {
         return 1
     fi
 
+    # Extract base64 key part only (strip key type and comment)
     local pub_key
-    pub_key=$(cat "${temp_key}.pub")
+    pub_key=$(awk '{print $2}' "${temp_key}.pub")
 
     # Build JSON request body safely using jq
+    # step-ca expects: ott (token), publicKey (base64 wire format)
     local json_body
     json_body=$(jq -n \
         --arg pk "$pub_key" \
-        --arg prov "$OIDC_CA_PROVISIONER" \
+        --arg ott "$_OIDC_ID_TOKEN" \
         --arg lifetime "+${OIDC_CERT_LIFETIME}s" \
-        '{"publicKey":$pk,"certType":"user","provisioner":$prov,"validAfter":"","validBefore":$lifetime}') || {
+        '{"publicKey":$pk,"ott":$ott,"certType":"user","validAfter":"","validBefore":$lifetime}') || {
         log_error "Failed to build CA request JSON"
         rm -f "$temp_key" "${temp_key}.pub"
         return 1
     }
 
-    # Send ID token via stdin to avoid cmdline exposure
     local response
-    response=$(printf 'Authorization: Bearer %s\n' "$_OIDC_ID_TOKEN" | \
-        curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
+    response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
+        -w '\n%{http_code}' \
         -X POST "$ca_endpoint" \
-        -H @- \
         -H "Content-Type: application/json" \
         -d "$json_body" 2>&1)
     local curl_exit=$?
 
     if [ $curl_exit -ne 0 ]; then
         log_error "CA certificate request failed: $response"
+        rm -f "$temp_key" "${temp_key}.pub"
+        return 2
+    fi
+
+    # Extract HTTP status code and response body
+    local http_code
+    http_code=$(echo "$response" | tail -1)
+    response=$(echo "$response" | sed '$d')
+
+    if [ "${http_code:-0}" != "200" ] && [ "${http_code:-0}" != "201" ]; then
+        log_error "CA returned HTTP $http_code: $response"
         rm -f "$temp_key" "${temp_key}.pub"
         return 2
     fi
@@ -937,6 +954,16 @@ oidc_get_certificate() {
         log_error "CA response missing certificate (crt field)"
         rm -f "$temp_key" "${temp_key}.pub"
         return 2
+    fi
+
+    # Ensure certificate is in OpenSSH format (type + base64)
+    if [[ "$cert" != ssh-* ]] && [[ "$cert" != ecdsa-* ]]; then
+        # step-ca returns raw base64 wire format; prepend key type
+        local cert_type
+        cert_type=$(echo "$cert" | base64 -d 2>/dev/null | head -c 100 | strings | head -1)
+        if [ -n "$cert_type" ]; then
+            cert="${cert_type} ${cert}"
+        fi
     fi
 
     # Save certificate and private key with secure permissions
@@ -1572,6 +1599,11 @@ debug_info() {
         echo "  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:0:8}..."
     else
         echo "  OIDC_CLIENT_ID: <not configured>"
+    fi
+    if [ -n "$OIDC_CLIENT_SECRET" ]; then
+        echo "  OIDC_CLIENT_SECRET: ********"
+    else
+        echo "  OIDC_CLIENT_SECRET: <not configured>"
     fi
     echo "  OIDC_CA_URL: ${OIDC_CA_URL:-<not configured>}"
     echo "  OIDC_AUTH_MODE: $OIDC_AUTH_MODE"
