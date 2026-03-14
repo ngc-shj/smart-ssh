@@ -444,6 +444,76 @@ _source_fn() {
     [ "$ret" -eq 1 ]
 }
 
+# Test: validate_oidc_urls() rejects empty OIDC_CA_URL
+@test "validate_oidc_urls rejects empty OIDC_CA_URL" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="https://accounts.example.com"
+    export OIDC_CA_URL=""
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: validate_oidc_urls() rejects http:// OIDC_CA_URL
+@test "validate_oidc_urls rejects http:// OIDC_CA_URL" {
+    _source_fn print_error log_error validate_oidc_urls
+    export COLOR_RED='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_ISSUER="https://accounts.example.com"
+    export OIDC_CA_URL="http://ca.example.com"
+
+    ret=0; validate_oidc_urls 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_oidc_cert_dir() creates cert directory
+@test "ensure_oidc_cert_dir creates cert directory" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+
+    ensure_oidc_cert_dir 2>/dev/null
+    [ "$?" -eq 0 ]
+    [ -d "$OIDC_CERT_DIR" ]
+    # Verify directory permissions are 700
+    local perms
+    perms=$(stat -f '%Lp' "$OIDC_CERT_DIR" 2>/dev/null || stat -c '%a' "$OIDC_CERT_DIR" 2>/dev/null)
+    [ "$perms" = "700" ]
+}
+
+# Test: ensure_oidc_cert_dir() rejects symlink in OIDC_CERT_DIR
+@test "ensure_oidc_cert_dir rejects symlink" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    # Create a symlink as OIDC_CERT_DIR target
+    ln -s /tmp "$TEST_CONFIG_DIR/.ssh/oidc-certs"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+
+    ret=0; ensure_oidc_cert_dir 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: oidc_check_cached_cert() returns 1 when cert exists but key missing
+@test "oidc_check_cached_cert returns 1 when only cert exists" {
+    _source_fn print_error print_debug log_error log_debug oidc_check_cached_cert
+    export COLOR_RED='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$OIDC_CERT_DIR"
+    # Create only the cert file, no key
+    touch "$OIDC_CERT_DIR/id_oidc-cert.pub"
+
+    ret=0; oidc_check_cached_cert 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
 # Test: --oidc with missing OIDC config shows error
 @test "--oidc with missing OIDC config shows error" {
     run env OIDC_ISSUER="" OIDC_CA_URL="" "$SMART_SSH" --dry-run --oidc test-host

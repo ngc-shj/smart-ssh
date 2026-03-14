@@ -817,8 +817,8 @@ oidc_poll_token() {
             -w '\n%{http_code}' \
             -X POST "$_OIDC_TOKEN_ENDPOINT" \
             -d @"$poll_data_file" 2>&1)
-        rm -f "$poll_data_file"
         local curl_exit=$?
+        rm -f "$poll_data_file"
 
         # Network-level error (curl itself failed)
         if [ $curl_exit -ne 0 ]; then
@@ -839,6 +839,13 @@ oidc_poll_token() {
         # HTTP 5xx: server error
         if [ "$http_code" -ge 500 ]; then
             log_error "Token endpoint server error (HTTP $http_code)"
+            return 2
+        fi
+
+        # HTTP 4xx (non-400): client error (401 unauthorized, 403 forbidden, etc.)
+        # HTTP 400 is expected per RFC 8628 for authorization_pending/slow_down
+        if [ "$http_code" -ge 400 ] && [ "$http_code" -ne 400 ]; then
+            log_error "Token endpoint returned HTTP $http_code: $response"
             return 2
         fi
 
@@ -929,8 +936,16 @@ oidc_get_certificate() {
 
     # Write JSON body to temp file to avoid cmdline exposure of ott (ID token)
     local body_file
-    body_file=$(umask 077 && mktemp)
-    printf '%s' "$json_body" > "$body_file"
+    body_file=$(umask 077 && mktemp) || {
+        log_error "Failed to create temp file for CA request"
+        rm -f "$temp_key" "${temp_key}.pub"
+        return 1
+    }
+    printf '%s' "$json_body" > "$body_file" || {
+        log_error "Failed to write CA request body"
+        rm -f "$body_file" "$temp_key" "${temp_key}.pub"
+        return 1
+    }
 
     local response
     response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
@@ -938,8 +953,8 @@ oidc_get_certificate() {
         -X POST "$ca_endpoint" \
         -H "Content-Type: application/json" \
         -d @"$body_file" 2>&1)
-    rm -f "$body_file"
     local curl_exit=$?
+    rm -f "$body_file"
 
     if [ $curl_exit -ne 0 ]; then
         log_error "CA certificate request failed: $response"
@@ -973,12 +988,17 @@ oidc_get_certificate() {
     fi
 
     # Ensure certificate is in OpenSSH format (type + base64)
-    if [[ "$cert" != ssh-* ]] && [[ "$cert" != ecdsa-* ]]; then
-        # step-ca returns raw base64 wire format; prepend key type
+    # Valid cert types contain "-cert-" (e.g., ssh-ed25519-cert-v01@openssh.com)
+    if ! [[ "$cert" =~ ^[a-z].*-cert- ]]; then
+        # step-ca returns raw base64 wire format; decode to extract cert type
         local cert_type
         cert_type=$(echo "$cert" | base64 -d 2>/dev/null | head -c 100 | strings | head -1)
-        if [ -n "$cert_type" ]; then
+        if [[ "$cert_type" =~ -cert- ]]; then
             cert="${cert_type} ${cert}"
+        else
+            log_error "CA returned unrecognized certificate format"
+            rm -f "$temp_key" "${temp_key}.pub"
+            return 2
         fi
     fi
 
@@ -1059,12 +1079,19 @@ ensure_oidc_cert_dir() {
         return 1
     fi
 
-    # Create ~/.ssh if it does not exist
+    # Create ~/.ssh if it does not exist, or validate permissions if it exists
     if [ ! -e "$ssh_dir" ]; then
         mkdir -m 700 "$ssh_dir" || {
             log_error "Failed to create $ssh_dir"
             return 1
         }
+    elif [ -d "$ssh_dir" ]; then
+        # Verify permissions are not too open (group/other should have no access)
+        local ssh_perms
+        ssh_perms=$(stat -f '%Lp' "$ssh_dir" 2>/dev/null || stat -c '%a' "$ssh_dir" 2>/dev/null)
+        if [ -n "$ssh_perms" ] && [ "$ssh_perms" != "700" ]; then
+            log_warn "$ssh_dir has permissions $ssh_perms (expected 700)"
+        fi
     fi
 
     # Reject symlinks for security (check before mkdir)
@@ -1258,7 +1285,7 @@ ssh_from_away() {
 
     # Create temporary SSH config that only uses the security key
     local temp_config
-    temp_config=$(mktemp)
+    temp_config=$(umask 077 && mktemp)
     trap 'rm -f "$temp_config"' RETURN
 
     # Check if ProxyJump is configured

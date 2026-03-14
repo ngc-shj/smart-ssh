@@ -1,72 +1,44 @@
 # Code Review: oidc-device-flow
 
 Date: 2026-03-14
-Review rounds: 3
+Review rounds: 1
 
 ## Round 1 Findings
 
 ### Functionality
 
-- F1 [Critical] curl --fail in oidc_poll_token breaks RFC 8628 (HTTP 400 for authorization_pending/slow_down is expected) → RESOLVED: removed --fail, added -w '%{http_code}' status code extraction
-- F2 [Critical] _OIDC_POLL_INTERVAL_OVERRIDE=0 causes infinite loop (elapsed never advances) → RESOLVED: added increment minimum 1
-- F3 [Major] trap RETURN competition: oidc_get_certificate overrides ssh_with_oidc's trap → RESOLVED: manual rm -f cleanup at all return points
-- F4 [Major] FORCE_OIDC path: `local oidc_exit_code=$?` resets $? to 0 → RESOLVED: separate declaration and assignment
-- F5 [Major] ssh-keygen failure returns exit 2 (network) instead of exit 1 (local) → RESOLVED: return 1
-- F6 [Minor] ensure_oidc_cert_dir symlink check after mkdir → RESOLVED: symlink check moved before mkdir
+- F1 [Critical] HTTP 4xx codes (non-400) not handled in oidc_poll_token — 401/403/404 fall through to JSON parsing instead of returning error → RESOLVED: added 4xx (non-400) check after 5xx check
+- F2 [Critical] `curl_exit=$?` after `rm -f` captures rm's exit code, not curl's (both oidc_poll_token and oidc_get_certificate) → RESOLVED: moved rm -f after curl_exit capture
+- F3 [Major] Certificate type detection pattern `[[ "$cert" != ssh-* ]]` is too broad — could match non-cert keys → RESOLVED: changed to regex `-cert-` pattern with validation
+- F4 [Major] Missing error check for printf to body_file in oidc_get_certificate → RESOLVED: added || error handler with cleanup
 
 ### Security
 
-- S1 [Major] JSON injection in oidc_get_certificate: shell variables interpolated into JSON string → RESOLVED: jq -n --arg
-- S2 [Major] Parameter injection in oidc_device_authorize: curl -d allows injection → RESOLVED: --data-urlencode
+- S1 [Major] mktemp without umask 077 in ssh_from_away() — temp config file created with default umask → RESOLVED: added umask 077
+- S2 [Major] Missing permission validation on existing ~/.ssh directory in ensure_oidc_cert_dir() → RESOLVED: added stat-based permission warning
 
 ### Testing
 
-- T1 [Critical] _OIDC_POLL_INTERVAL_OVERRIDE=0 infinite loop → Same as F2, RESOLVED
-- T2 [Major] Exit code from ssh-keygen failure → Same as F5, RESOLVED
-- T3 [Major] FORCE_OIDC exit code capture → Same as F4, RESOLVED
-
-## Round 2 Findings
-
-### Functionality
-
-- F1 [Major] printf Authorization header missing trailing newline for curl -H @- → RESOLVED: added \n to format string
-- F2 [Major] jq command failure unchecked in oidc_get_certificate → RESOLVED: added || { log_error; cleanup; return 1 }
-
-### Security
-
-- S1 [Major] HTTP status code not validated as numeric before arithmetic comparison → RESOLVED: regex check ^[0-9]+$
-- S2 [Minor] OIDC_CERT_LIFETIME not validated as positive integer → NOT FIXED: CA server rejects invalid values; over-validation
-- S3 [Minor] slow_down backoff unbounded → NOT FIXED: controlled by expires_in timeout
-- S4 [Minor] OIDC_CA_PROVISIONER not validated → NOT FIXED: CA server validates; jq --arg prevents injection
-
-### Testing
-
-- T1 [Minor] OIDC tests not yet written → Acknowledged: separate planned task (Phase 2 Step 6)
-- T2 [Minor] validate_oidc_urls edge cases → Acknowledged: will be covered in test writing task
-
-## Round 3 Findings
-
-No findings. All Round 2 fixes verified as correct and complete.
+- T1 [Critical] Missing test for empty OIDC_CA_URL in validate_oidc_urls → RESOLVED: added test
+- T2 [Critical] Missing test for http:// OIDC_CA_URL in validate_oidc_urls → RESOLVED: added test
+- T3 [Major] oidc_discover, oidc_device_authorize, oidc_poll_token, oidc_get_certificate, ensure_oidc_cert_dir have zero test coverage → PARTIALLY RESOLVED: added ensure_oidc_cert_dir tests (create + symlink rejection). Network-dependent functions (discover, authorize, poll, get_cert) require curl mocking — deferred to separate task
+- T4 [Major] oidc_check_cached_cert has insufficient edge case testing → RESOLVED: added cert-only-no-key test case
+- T5 [Minor] ssh_with_oidc integration test coverage missing → NOT FIXED: requires full OIDC mock infrastructure
+- T6 [Minor] OIDC_CERT_LIFETIME validation missing → NOT FIXED: CA server validates; over-validation
 
 ## Resolution Status
 
 ### Round 1
 
-| ID | Severity | Problem | Action | File:Line |
-|----|----------|---------|--------|-----------|
-| F1 | Critical | curl --fail breaks RFC 8628 polling | Removed --fail, added HTTP status code extraction | smart-ssh:800-825 |
-| F2 | Critical | _OIDC_POLL_INTERVAL_OVERRIDE=0 infinite loop | Added increment minimum 1 | smart-ssh:794-795 |
-| F3 | Major | trap RETURN competition | Manual rm -f at all return points | smart-ssh:887-950 |
-| F4 | Major | local resets $? in FORCE_OIDC path | Separate declaration and || assignment | smart-ssh:1410-1411 |
-| F5 | Major | ssh-keygen failure exit 2 → 1 | Changed return 2 to return 1 | smart-ssh:892 |
-| F6 | Minor | Symlink check after mkdir | Moved check before mkdir | smart-ssh:1004-1021 |
-| S1 | Major | JSON injection via shell variables | jq -n --arg for JSON construction | smart-ssh:900-908 |
-| S2 | Major | Parameter injection via curl -d | --data-urlencode | smart-ssh:733-734 |
-
-### Round 2
-
-| ID | Severity | Problem | Action | File:Line |
-|----|----------|---------|--------|-----------|
-| F1 | Major | Missing newline in Authorization header | Added \n to printf format | smart-ssh:914 |
-| F2 | Major | jq failure unchecked | Added || error handler with cleanup | smart-ssh:904-908 |
-| S1 | Major | Non-numeric http_code causes arithmetic error | Added regex validation | smart-ssh:819-822 |
+| ID  | Severity | Problem                                  | Action                                  | File:Line                  |
+| --- | -------- | ---------------------------------------- | --------------------------------------- | -------------------------- |
+| F1  | Critical | HTTP 4xx (non-400) unhandled in poll     | Added 4xx check after 5xx check         | smart-ssh:845-850          |
+| F2  | Critical | curl_exit=$? captures rm exit code       | Moved rm -f after curl_exit capture     | smart-ssh:820-821 941-942  |
+| F3  | Major    | Cert type detection too broad            | Changed to -cert- regex with validation | smart-ssh:983-994          |
+| F4  | Major    | printf to body_file unchecked            | Added error handler                     | smart-ssh:937-940          |
+| S1  | Major    | mktemp without umask 077                 | Added umask 077 subshell                | smart-ssh:1271             |
+| S2  | Major    | No permission check on existing ~/.ssh   | Added stat-based permission warning     | smart-ssh:1070-1077        |
+| T1  | Critical | No test for empty OIDC_CA_URL            | Added test                              | tests/test_smart_ssh.bats  |
+| T2  | Critical | No test for http:// OIDC_CA_URL          | Added test                              | tests/test_smart_ssh.bats  |
+| T3  | Major    | ensure_oidc_cert_dir untested            | Added create + symlink tests            | tests/test_smart_ssh.bats  |
+| T4  | Major    | oidc_check_cached_cert edge cases        | Added cert-only test                    | tests/test_smart_ssh.bats  |
