@@ -684,15 +684,16 @@ oidc_discover() {
         return 2
     fi
 
-    # Validate JSON and extract required fields
-    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    # Validate JSON and extract required fields in a single jq call
+    local endpoints
+    endpoints=$(echo "$response" | jq -r '[.device_authorization_endpoint // "", .token_endpoint // ""] | @tsv' 2>/dev/null) || {
         log_error "OIDC discovery returned malformed JSON"
         return 2
-    fi
+    }
 
     local device_endpoint token_endpoint
-    device_endpoint=$(echo "$response" | jq -r '.device_authorization_endpoint // empty')
-    token_endpoint=$(echo "$response" | jq -r '.token_endpoint // empty')
+    device_endpoint=$(echo "$endpoints" | cut -f1)
+    token_endpoint=$(echo "$endpoints" | cut -f2)
 
     if [ -z "$device_endpoint" ]; then
         log_error "OIDC discovery missing device_authorization_endpoint"
@@ -726,6 +727,9 @@ oidc_discover() {
 # Sets globals: _OIDC_DEVICE_CODE, _OIDC_USER_CODE, _OIDC_VERIFICATION_URI,
 #               _OIDC_EXPIRES_IN, _OIDC_POLL_INTERVAL
 oidc_device_authorize() {
+    # NOTE: client_secret is intentionally not sent in the Device Authorization Request.
+    # RFC 8628 §3.1 makes it optional, and most providers (Google, Microsoft) don't require it here.
+    # client_secret is sent in the token poll request (oidc_poll_token) where it's needed.
     local response
     response=$(curl --fail --silent --show-error --max-time 30 --connect-timeout 10 \
         -X POST "$_OIDC_DEVICE_ENDPOINT" \
@@ -736,17 +740,25 @@ oidc_device_authorize() {
         return 2
     fi
 
-    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+    # Validate JSON and extract all fields in a single jq call
+    # Google uses "verification_url" instead of RFC 8628 "verification_uri"
+    local fields
+    fields=$(echo "$response" | jq -r '[
+        .device_code // "",
+        .user_code // "",
+        .verification_uri // .verification_url // "",
+        (.expires_in // 300 | tostring),
+        (.interval // 5 | tostring)
+    ] | @tsv' 2>/dev/null) || {
         log_error "Device authorization returned malformed JSON"
         return 2
-    fi
+    }
 
-    _OIDC_DEVICE_CODE=$(echo "$response" | jq -r '.device_code // empty')
-    _OIDC_USER_CODE=$(echo "$response" | jq -r '.user_code // empty')
-    # Google uses "verification_url" instead of RFC 8628 "verification_uri"
-    _OIDC_VERIFICATION_URI=$(echo "$response" | jq -r '.verification_uri // .verification_url // empty')
-    _OIDC_EXPIRES_IN=$(echo "$response" | jq -r '.expires_in // 300')
-    _OIDC_POLL_INTERVAL=$(echo "$response" | jq -r '.interval // 5')
+    _OIDC_DEVICE_CODE=$(echo "$fields" | cut -f1)
+    _OIDC_USER_CODE=$(echo "$fields" | cut -f2)
+    _OIDC_VERIFICATION_URI=$(echo "$fields" | cut -f3)
+    _OIDC_EXPIRES_IN=$(echo "$fields" | cut -f4)
+    _OIDC_POLL_INTERVAL=$(echo "$fields" | cut -f5)
 
     if [ -z "$_OIDC_DEVICE_CODE" ] || [ -z "$_OIDC_USER_CODE" ] || [ -z "$_OIDC_VERIFICATION_URI" ]; then
         log_error "Device authorization response missing required fields"
@@ -790,7 +802,31 @@ oidc_poll_token() {
 
     log_info "Waiting for authorization (timeout: ${timeout}s)..."
 
+    # Write POST body to temp file once (content is constant across iterations)
+    # Avoids cmdline exposure of client_secret
+    local poll_data_file
+    poll_data_file=$(umask 077 && mktemp) || {
+        log_error "Failed to create temp file for token poll"
+        return 2
+    }
+    _cleanup_poll() { rm -f "$poll_data_file"; }
+    trap '_cleanup_poll' INT TERM
+    # Percent-encode values per RFC 3986 (application/x-www-form-urlencoded)
+    {
+        printf 'grant_type=%s' "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+        printf '&device_code=%s' "$(printf '%s' "${_OIDC_DEVICE_CODE}" | jq -sRr @uri)"
+        printf '&client_id=%s' "$(printf '%s' "${OIDC_CLIENT_ID}" | jq -sRr @uri)"
+        if [ -n "$OIDC_CLIENT_SECRET" ]; then
+            printf '&client_secret=%s' "$(printf '%s' "${OIDC_CLIENT_SECRET}" | jq -sRr @uri)"
+        fi
+    } > "$poll_data_file" || {
+        log_error "Failed to write token poll body"
+        _cleanup_poll; return 2
+    }
+
     while [ "$elapsed" -lt "$timeout" ]; do
+        # NOTE: _OIDC_POLL_INTERVAL_OVERRIDE is for testing only; it bypasses
+        # slow_down enforcement. Must not be set in production.
         local sleep_time="${_OIDC_POLL_INTERVAL_OVERRIDE:-$current_interval}"
 
         sleep "$sleep_time"
@@ -800,37 +836,17 @@ oidc_poll_token() {
 
         # Do NOT use --fail here: RFC 8628 returns HTTP 400 for
         # authorization_pending/slow_down which are expected responses
-        # Write POST body to temp file to avoid cmdline exposure of client_secret
-        local poll_data_file
-        poll_data_file=$(umask 077 && mktemp) || {
-            log_error "Failed to create temp file for token poll"
-            return 2
-        }
-        {
-            printf 'grant_type=%s' "urn:ietf:params:oauth:grant-type:device_code"
-            printf '&device_code=%s' "${_OIDC_DEVICE_CODE}"
-            printf '&client_id=%s' "${OIDC_CLIENT_ID}"
-            if [ -n "$OIDC_CLIENT_SECRET" ]; then
-                printf '&client_secret=%s' "${OIDC_CLIENT_SECRET}"
-            fi
-        } > "$poll_data_file" || {
-            log_error "Failed to write token poll body"
-            rm -f "$poll_data_file"
-            return 2
-        }
-
         local response http_code
         response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
             -w '\n%{http_code}' \
             -X POST "$_OIDC_TOKEN_ENDPOINT" \
             -d @"$poll_data_file" 2>&1)
         local curl_exit=$?
-        rm -f "$poll_data_file"
 
         # Network-level error (curl itself failed)
         if [ $curl_exit -ne 0 ]; then
             log_error "Token poll request failed: $response"
-            return 2
+            _cleanup_poll; return 2
         fi
 
         # Extract HTTP status code (last line) and response body
@@ -840,35 +856,36 @@ oidc_poll_token() {
         # Validate http_code is numeric
         if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
             log_error "Token endpoint returned invalid HTTP status: $http_code"
-            return 2
+            _cleanup_poll; return 2
         fi
 
         # HTTP 5xx: server error
         if [ "$http_code" -ge 500 ]; then
             log_error "Token endpoint server error (HTTP $http_code)"
-            return 2
+            _cleanup_poll; return 2
         fi
 
-        # HTTP 4xx (non-400): client error (401 unauthorized, 403 forbidden, etc.)
-        # HTTP 400 is expected per RFC 8628 for authorization_pending/slow_down
-        if [ "$http_code" -ge 400 ] && [ "$http_code" -ne 400 ]; then
-            log_error "Token endpoint returned HTTP $http_code: $response"
-            return 2
-        fi
-
-        if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+        # HTTP 2xx with no JSON body is unexpected
+        # HTTP 4xx: parse JSON body to check for RFC 8628 error codes
+        # Note: Google returns HTTP 428 for authorization_pending (non-standard)
+        local token_fields
+        token_fields=$(echo "$response" | jq -r '[.error // "", .id_token // ""] | @tsv' 2>/dev/null) || {
+            if [ "$http_code" -ge 400 ]; then
+                log_error "Token endpoint returned HTTP $http_code with non-JSON body"
+                _cleanup_poll; return 2
+            fi
             log_error "Token endpoint returned malformed response"
-            return 2
-        fi
+            _cleanup_poll; return 2
+        }
 
         local error id_token
-        error=$(echo "$response" | jq -r '.error // empty')
-        id_token=$(echo "$response" | jq -r '.id_token // empty')
+        error=$(echo "$token_fields" | cut -f1)
+        id_token=$(echo "$token_fields" | cut -f2)
 
         if [ -z "$error" ] && [ -n "$id_token" ]; then
             _OIDC_ID_TOKEN="$id_token"
             log_debug "ID token obtained (length: ${#id_token})"
-            return 0
+            _cleanup_poll; return 0
         fi
 
         case "$error" in
@@ -881,25 +898,29 @@ oidc_poll_token() {
                 ;;
             access_denied)
                 log_error "OIDC authorization denied by user"
-                return 3
+                _cleanup_poll; return 3
                 ;;
             expired_token)
                 log_error "OIDC device code expired"
-                return 3
+                _cleanup_poll; return 3
                 ;;
             "")
                 # No error but also no id_token; treat as pending
                 log_debug "Token response missing both error and id_token, retrying..."
                 ;;
             *)
-                log_error "OIDC token error: $error"
-                return 3
+                log_error "OIDC token error: $error (HTTP $http_code)"
+                # HTTP 401/403: likely misconfigured client credentials
+                if [ "$http_code" -eq 401 ] || [ "$http_code" -eq 403 ]; then
+                    _cleanup_poll; return 1
+                fi
+                _cleanup_poll; return 3
                 ;;
         esac
     done
 
     log_error "OIDC polling timed out waiting for authorization"
-    return 3
+    _cleanup_poll; return 3
 }
 
 # Send ID token to CA API and save certificate + key files
@@ -907,29 +928,30 @@ oidc_poll_token() {
 oidc_get_certificate() {
     local cert_file="${OIDC_CERT_DIR}/id_oidc-cert.pub"
     local key_file="${OIDC_CERT_DIR}/id_oidc"
-    # CA endpoint: use OIDC_CA_URL as-is (user specifies full path)
     local ca_endpoint="${OIDC_CA_URL%/}/ssh/sign"
 
     log_debug "Requesting SSH certificate from CA: $ca_endpoint"
 
-    # Generate a new ephemeral key pair for the certificate
-    # NOTE: Do not use 'trap RETURN' here - it would override the caller's trap
-    local temp_key
-    temp_key=$(umask 077 && mktemp)
-    rm -f "$temp_key"  # ssh-keygen needs non-existent file
+    # Generate a new ephemeral key pair in a secure temp directory
+    # Uses mktemp -d to avoid TOCTOU between file deletion and ssh-keygen
+    local temp_key_dir
+    temp_key_dir=$(umask 077 && mktemp -d) || {
+        log_error "Failed to create temp directory for ephemeral key"
+        return 1
+    }
+    local temp_key="$temp_key_dir/id_oidc_ephemeral"
+    # Cleanup helper (cannot use trap RETURN — it would override the caller's trap)
+    _cleanup_ephemeral() { rm -rf "$temp_key_dir"; }
 
     if ! ssh-keygen -t ed25519 -f "$temp_key" -N "" -q >/dev/null 2>&1; then
         log_error "Failed to generate ephemeral key pair"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 1
+        _cleanup_ephemeral; return 1
     fi
 
-    # Extract base64 key part only (strip key type and comment)
     local pub_key
     pub_key=$(awk '{print $2}' "${temp_key}.pub")
 
     # Build JSON request body safely using jq
-    # step-ca expects: ott (token), publicKey (base64 wire format)
     local json_body
     json_body=$(jq -n \
         --arg pk "$pub_key" \
@@ -937,21 +959,18 @@ oidc_get_certificate() {
         --arg lifetime "+${OIDC_CERT_LIFETIME}s" \
         '{"publicKey":$pk,"ott":$ott,"certType":"user","validAfter":"","validBefore":$lifetime}') || {
         log_error "Failed to build CA request JSON"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 1
+        _cleanup_ephemeral; return 1
     }
 
     # Write JSON body to temp file to avoid cmdline exposure of ott (ID token)
     local body_file
     body_file=$(umask 077 && mktemp) || {
         log_error "Failed to create temp file for CA request"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 1
+        _cleanup_ephemeral; return 1
     }
     printf '%s' "$json_body" > "$body_file" || {
         log_error "Failed to write CA request body"
-        rm -f "$body_file" "$temp_key" "${temp_key}.pub"
-        return 1
+        rm -f "$body_file"; _cleanup_ephemeral; return 1
     }
 
     local response
@@ -965,65 +984,61 @@ oidc_get_certificate() {
 
     if [ $curl_exit -ne 0 ]; then
         log_error "CA certificate request failed: $response"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
+        _cleanup_ephemeral; return 2
     fi
 
-    # Extract HTTP status code and response body
-    local http_code
-    http_code=$(echo "$response" | tail -1)
-    response=$(echo "$response" | sed '$d')
+    # Extract HTTP status code (last line) and response body
+    local http_code="${response##*$'\n'}"
+    response="${response%$'\n'*}"
 
     if [ "${http_code:-0}" != "200" ] && [ "${http_code:-0}" != "201" ]; then
         log_error "CA returned HTTP $http_code: $response"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
+        _cleanup_ephemeral; return 2
     fi
 
-    if ! echo "$response" | jq -e . >/dev/null 2>&1; then
-        log_error "CA returned malformed JSON"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
-    fi
-
+    # Validate JSON and extract certificate in a single jq call
     local cert
-    cert=$(echo "$response" | jq -r '.crt // empty')
+    cert=$(echo "$response" | jq -re '.crt // empty' 2>/dev/null) || {
+        log_error "CA returned malformed JSON or missing crt field"
+        _cleanup_ephemeral; return 2
+    }
     if [ -z "$cert" ]; then
         log_error "CA response missing certificate (crt field)"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
+        _cleanup_ephemeral; return 2
     fi
 
     # Ensure certificate is in OpenSSH format (type + base64)
-    # Valid cert types contain "-cert-" (e.g., ssh-ed25519-cert-v01@openssh.com)
     if ! [[ "$cert" =~ ^[a-z].*-cert- ]]; then
-        # step-ca returns raw base64 wire format; decode to extract cert type
-        local cert_type
-        cert_type=$(echo "$cert" | base64 -d 2>/dev/null | head -c 100 | tr -dc '[:print:]' | head -1)
-        if [[ "$cert_type" =~ -cert- ]]; then
-            cert="${cert_type} ${cert}"
+        # step-ca returns raw base64 wire format; derive cert type from key type
+        local key_type
+        key_type=$(awk '{print $1}' "${temp_key}.pub")
+        if [ -n "$key_type" ]; then
+            log_debug "Prepending cert type: ${key_type}-cert-v01@openssh.com"
+            cert="${key_type}-cert-v01@openssh.com ${cert}"
         else
-            log_error "CA returned unrecognized certificate format"
-            rm -f "$temp_key" "${temp_key}.pub"
-            return 2
+            log_error "Failed to determine key type from ${temp_key}.pub"
+            _cleanup_ephemeral; return 2
         fi
     fi
 
     # Save certificate and private key with secure permissions
     (umask 077 && printf '%s\n' "$cert" > "$cert_file") || {
         log_error "Failed to write certificate file: $cert_file"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
+        _cleanup_ephemeral; return 2
     }
     (umask 077 && cp "$temp_key" "$key_file") || {
         log_error "Failed to write key file: $key_file"
-        rm -f "$temp_key" "${temp_key}.pub"
-        return 2
+        _cleanup_ephemeral; return 2
     }
     chmod 600 "$cert_file" "$key_file"
+    _cleanup_ephemeral
 
-    # Clean up ephemeral key pair
-    rm -f "$temp_key" "${temp_key}.pub"
+    # Validate the saved certificate is parseable by OpenSSH
+    if ! ssh-keygen -L -f "$cert_file" >/dev/null 2>&1; then
+        log_error "CA returned an invalid SSH certificate"
+        rm -f "$cert_file" "$key_file"
+        return 2
+    fi
 
     log_debug "Certificate saved: $cert_file"
     log_debug "Key saved: $key_file"
@@ -1047,6 +1062,12 @@ oidc_check_cached_cert() {
     if [ -z "$valid_to_str" ]; then
         log_debug "Cannot parse certificate validity"
         return 1
+    fi
+
+    # Handle "forever" validity (no expiry)
+    if [[ "$valid_to_str" == *"forever"* ]]; then
+        log_debug "Certificate valid forever"
+        return 0
     fi
 
     # Convert to epoch seconds (macOS vs Linux)
@@ -1074,58 +1095,34 @@ oidc_check_cached_cert() {
     return 1
 }
 
+# Ensure a directory exists with mode 700, rejecting symlinks
+# Usage: ensure_secure_dir /path/to/dir
+ensure_secure_dir() {
+    local dir="$1"
+    if [ -L "$dir" ]; then
+        log_error "Security error: $dir is a symlink"
+        return 1
+    fi
+    if [ ! -e "$dir" ]; then
+        mkdir -m 700 "$dir" || { log_error "Failed to create $dir"; return 1; }
+    elif [ -d "$dir" ]; then
+        local perms
+        perms=$(stat -f '%Lp' "$dir" 2>/dev/null || stat -c '%a' "$dir" 2>/dev/null)
+        if [ -n "$perms" ] && [ "$perms" != "700" ]; then
+            log_warn "$dir has permissions $perms (expected 700)"
+        fi
+    else
+        log_error "$dir exists but is not a directory"
+        return 1
+    fi
+    return 0
+}
+
 # Create certificate directory with secure permissions
 # Creates ~/.ssh/ if needed (chmod 700), then OIDC_CERT_DIR (chmod 700)
-# Verifies no symlinks in the path
 ensure_oidc_cert_dir() {
-    local ssh_dir="$HOME/.ssh"
-
-    # Reject symlinks for security (check before mkdir)
-    if [ -L "$ssh_dir" ]; then
-        log_error "Security error: $ssh_dir is a symlink"
-        return 1
-    fi
-
-    # Create ~/.ssh if it does not exist, or validate permissions if it exists
-    if [ ! -e "$ssh_dir" ]; then
-        mkdir -m 700 "$ssh_dir" || {
-            log_error "Failed to create $ssh_dir"
-            return 1
-        }
-    elif [ -d "$ssh_dir" ]; then
-        # Verify permissions are not too open (group/other should have no access)
-        local ssh_perms
-        ssh_perms=$(stat -f '%Lp' "$ssh_dir" 2>/dev/null || stat -c '%a' "$ssh_dir" 2>/dev/null)
-        if [ -n "$ssh_perms" ] && [ "$ssh_perms" != "700" ]; then
-            log_warn "$ssh_dir has permissions $ssh_perms (expected 700)"
-        fi
-    fi
-
-    # Reject symlinks for security (check before mkdir)
-    if [ -L "$OIDC_CERT_DIR" ]; then
-        log_error "Security error: $OIDC_CERT_DIR is a symlink"
-        return 1
-    fi
-
-    # Create OIDC cert directory, or validate permissions if it exists
-    if [ ! -e "$OIDC_CERT_DIR" ]; then
-        mkdir -m 700 "$OIDC_CERT_DIR" || {
-            log_error "Failed to create OIDC cert directory: $OIDC_CERT_DIR"
-            return 1
-        }
-    elif [ -d "$OIDC_CERT_DIR" ]; then
-        local cert_dir_perms
-        cert_dir_perms=$(stat -f '%Lp' "$OIDC_CERT_DIR" 2>/dev/null || stat -c '%a' "$OIDC_CERT_DIR" 2>/dev/null)
-        if [ -n "$cert_dir_perms" ] && [ "$cert_dir_perms" != "700" ]; then
-            log_warn "$OIDC_CERT_DIR has permissions $cert_dir_perms (expected 700)"
-        fi
-    fi
-
-    if [ ! -d "$OIDC_CERT_DIR" ]; then
-        log_error "OIDC_CERT_DIR exists but is not a directory: $OIDC_CERT_DIR"
-        return 1
-    fi
-
+    ensure_secure_dir "$HOME/.ssh" || return 1
+    ensure_secure_dir "$OIDC_CERT_DIR" || return 1
     return 0
 }
 
@@ -1174,47 +1171,48 @@ ssh_with_oidc() {
     temp_config=$(umask 077 && mktemp) || return 1
     trap 'rm -f "$temp_config"' RETURN INT TERM
 
-    # Check if ProxyJump is configured
+    # Helper to append OIDC identity lines to temp config
+    _append_oidc_identity() {
+        echo "    IdentityFile $key_file" >> "$temp_config"
+        echo "    CertificateFile $cert_file" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+    }
+
+    # Cache ssh -G output to avoid repeated invocations
+    local ssh_g_host
+    ssh_g_host=$(ssh -G "$hostname" 2>/dev/null)
+
     local proxy_jump
-    proxy_jump=$(ssh -G "$hostname" 2>/dev/null | grep "^proxyjump " | awk '{print $2}')
+    proxy_jump=$(echo "$ssh_g_host" | grep "^proxyjump " | awk '{print $2}')
 
     if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
         log_debug "ProxyJump detected for OIDC: $proxy_jump"
+        local ssh_g_proxy
+        ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
+
         echo "Host $proxy_jump" >> "$temp_config"
-        ssh -G "$proxy_jump" 2>/dev/null | \
+        echo "$ssh_g_proxy" | \
             grep -E "^(hostname|port|user) " | \
             awk '{print "    " $1 " " $2}' >> "$temp_config"
-        echo "    IdentityFile $key_file" >> "$temp_config"
-        echo "    CertificateFile $cert_file" >> "$temp_config"
-        echo "    IdentitiesOnly yes" >> "$temp_config"
-        echo "    IdentityAgent none" >> "$temp_config"
+        _append_oidc_identity
         echo "" >> "$temp_config"
 
         echo "Host $hostname" >> "$temp_config"
-        ssh -G "$hostname" 2>/dev/null | \
+        echo "$ssh_g_host" | \
             grep -E "^(hostname|port|user|proxyjump|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
             awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
-        echo "    IdentityFile $key_file" >> "$temp_config"
-        echo "    CertificateFile $cert_file" >> "$temp_config"
-        echo "    IdentitiesOnly yes" >> "$temp_config"
-        echo "    IdentityAgent none" >> "$temp_config"
+        _append_oidc_identity
     else
         echo "Host $hostname" >> "$temp_config"
-        ssh -G "$hostname" 2>/dev/null | \
+        echo "$ssh_g_host" | \
             grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
             awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
-        echo "    IdentityFile $key_file" >> "$temp_config"
-        echo "    CertificateFile $cert_file" >> "$temp_config"
-        echo "    IdentitiesOnly yes" >> "$temp_config"
-        echo "    IdentityAgent none" >> "$temp_config"
+        _append_oidc_identity
     fi
 
     if [ "$dry_run" = true ]; then
-        if [ ${#ssh_options[@]} -gt 0 ]; then
-            print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
-        else
-            print_info "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
-        fi
+        print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1222,13 +1220,8 @@ ssh_with_oidc() {
         return 0
     fi
 
-    if [ ${#ssh_options[@]} -gt 0 ]; then
-        log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
-        ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
-    else
-        log_debug "Executing: ssh -F $temp_config $hostname"
-        ssh -F "$temp_config" "$hostname"
-    fi
+    log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
+    ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
 }
 
 # Check SSH configuration exists (single host entry)
@@ -1255,21 +1248,12 @@ ssh_from_home() {
     print_info "Target: $hostname"
 
     if [ "$dry_run" = true ]; then
-        if [ ${#ssh_options[@]} -gt 0 ]; then
-            print_debug "[DRY RUN] Would execute: ssh ${ssh_options[*]} $hostname"
-        else
-            print_debug "[DRY RUN] Would execute: ssh $hostname"
-        fi
+        print_debug "[DRY RUN] Would execute: ssh ${ssh_options[*]} $hostname"
         return 0
     fi
 
-    if [ ${#ssh_options[@]} -gt 0 ]; then
-        log_debug "Executing: ssh ${ssh_options[*]} $hostname"
-        ssh "${ssh_options[@]}" "$hostname"
-    else
-        log_debug "Executing: ssh $hostname"
-        ssh "$hostname"
-    fi
+    log_debug "Executing: ssh ${ssh_options[*]} $hostname"
+    ssh "${ssh_options[@]}" "$hostname"
 }
 
 # Connect from away (security key authentication)
@@ -1301,28 +1285,39 @@ ssh_from_away() {
     temp_config=$(umask 077 && mktemp)
     trap 'rm -f "$temp_config"' RETURN
 
-    # Check if ProxyJump is configured
+    # Helper to append security key identity lines to temp config
+    _append_sk_identity() {
+        echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
+        echo "    IdentitiesOnly yes" >> "$temp_config"
+        echo "    IdentityAgent none" >> "$temp_config"
+    }
+
+    # Cache ssh -G output to avoid repeated invocations
+    local ssh_g_host
+    ssh_g_host=$(ssh -G "$hostname" 2>/dev/null)
+
     local proxy_jump
-    proxy_jump=$(ssh -G "$hostname" 2>/dev/null | grep "^proxyjump " | awk '{print $2}')
+    proxy_jump=$(echo "$ssh_g_host" | grep "^proxyjump " | awk '{print $2}')
 
     # If ProxyJump is configured, add the proxy host configuration first
     if [ -n "$proxy_jump" ] && [ "$proxy_jump" != "none" ]; then
         log_debug "ProxyJump detected: $proxy_jump"
+        local ssh_g_proxy
+        ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
+
         # Add proxy host configuration with security key
         echo "Host $proxy_jump" >> "$temp_config"
-        ssh -G "$proxy_jump" 2>/dev/null | \
+        echo "$ssh_g_proxy" | \
             grep -v "^identityfile " | \
             grep -v "^identityagent " | \
             grep -E "^(hostname|port|user) " | \
             awk '{print "    " $1 " " $2}' >> "$temp_config"
-        echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
-        echo "    IdentitiesOnly yes" >> "$temp_config"
-        echo "    IdentityAgent none" >> "$temp_config"
+        _append_sk_identity
         echo "" >> "$temp_config"
 
         # Add target host configuration (keep original IdentityFile for final destination)
         echo "Host $hostname" >> "$temp_config"
-        ssh -G "$hostname" 2>/dev/null | \
+        echo "$ssh_g_host" | \
             grep -v "^identityagent " | \
             grep -E "^(hostname|port|user|proxyjump|localforward|identityfile|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
             awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
@@ -1331,27 +1326,27 @@ ssh_from_away() {
         # No ProxyJump - direct connection with security key
         # Check if hostname references another Host alias
         local target_hostname
-        target_hostname=$(ssh -G "$hostname" 2>/dev/null | grep "^hostname " | awk '{print $2}')
+        target_hostname=$(echo "$ssh_g_host" | grep "^hostname " | awk '{print $2}')
 
         # If target_hostname is a Host alias (not a FQDN/IP), resolve it
         local is_alias=false
+        local ssh_g_target=""
         if [ -n "$target_hostname" ] && [ "$target_hostname" != "$hostname" ]; then
+            ssh_g_target=$(ssh -G "$target_hostname" 2>/dev/null)
             local alias_hostname
-            alias_hostname=$(ssh -G "$target_hostname" 2>/dev/null | grep "^hostname " | awk '{print $2}')
+            alias_hostname=$(echo "$ssh_g_target" | grep "^hostname " | awk '{print $2}')
             # Check if the alias resolves to a different hostname (meaning it's a Host entry)
             if [ -n "$alias_hostname" ] && [ "$alias_hostname" != "$target_hostname" ]; then
                 log_debug "HostName alias detected: $target_hostname -> $alias_hostname"
                 is_alias=true
                 # Add the alias host configuration
                 echo "Host $target_hostname" >> "$temp_config"
-                ssh -G "$target_hostname" 2>/dev/null | \
+                echo "$ssh_g_target" | \
                     grep -v "^identityfile " | \
                     grep -v "^identityagent " | \
                     grep -E "^(hostname|port|user) " | \
                     awk '{print "    " $1 " " $2}' >> "$temp_config"
-                echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
-                echo "    IdentitiesOnly yes" >> "$temp_config"
-                echo "    IdentityAgent none" >> "$temp_config"
+                _append_sk_identity
                 echo "" >> "$temp_config"
             fi
         fi
@@ -1361,34 +1356,28 @@ ssh_from_away() {
             # Use settings from the alias host, plus localforward from original
             # Use the resolved hostname (FQDN/IP), not the alias
             echo "    hostname $alias_hostname" >> "$temp_config"
-            ssh -G "$target_hostname" 2>/dev/null | \
+            echo "$ssh_g_target" | \
                 grep -v "^identityfile " | \
                 grep -v "^identityagent " | \
                 grep -v "^hostname " | \
                 grep -E "^(port|user) " | \
                 awk '{print "    " $1 " " $2}' >> "$temp_config"
             # Add localforward and tunnel options from original config
-            ssh -G "$hostname" 2>/dev/null | \
+            echo "$ssh_g_host" | \
                 grep -E "^(localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
                 awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
         else
-            ssh -G "$hostname" 2>/dev/null | \
+            echo "$ssh_g_host" | \
                 grep -v "^identityfile " | \
                 grep -v "^identityagent " | \
                 grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
                 awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
         fi
-        echo "    IdentityFile $SECURITY_KEY_PATH" >> "$temp_config"
-        echo "    IdentitiesOnly yes" >> "$temp_config"
-        echo "    IdentityAgent none" >> "$temp_config"
+        _append_sk_identity
     fi
 
     if [ "$dry_run" = true ]; then
-        if [ ${#ssh_options[@]} -gt 0 ]; then
-            print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
-        else
-            print_info "[DRY RUN] Would execute: ssh -F $temp_config $hostname"
-        fi
+        print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1396,13 +1385,8 @@ ssh_from_away() {
         return 0
     fi
 
-    if [ ${#ssh_options[@]} -gt 0 ]; then
-        log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
-        ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
-    else
-        log_debug "Executing: ssh -F $temp_config $hostname"
-        ssh -F "$temp_config" "$hostname"
-    fi
+    log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
+    ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
 }
 
 # Main function

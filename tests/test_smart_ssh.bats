@@ -470,7 +470,7 @@ _source_fn() {
 
 # Test: ensure_oidc_cert_dir() creates cert directory
 @test "ensure_oidc_cert_dir creates cert directory" {
-    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
     export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
     export CURRENT_LOG_LEVEL=3
     export HOME="$TEST_CONFIG_DIR"
@@ -487,7 +487,7 @@ _source_fn() {
 
 # Test: ensure_oidc_cert_dir() rejects symlink in OIDC_CERT_DIR
 @test "ensure_oidc_cert_dir rejects symlink" {
-    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
     export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
     export CURRENT_LOG_LEVEL=3
     export HOME="$TEST_CONFIG_DIR"
@@ -502,7 +502,7 @@ _source_fn() {
 
 # Test: ensure_oidc_cert_dir() rejects symlink on ~/.ssh itself
 @test "ensure_oidc_cert_dir rejects symlink on ssh dir" {
-    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
     export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
     export CURRENT_LOG_LEVEL=3
     export HOME="$TEST_CONFIG_DIR"
@@ -516,7 +516,7 @@ _source_fn() {
 
 # Test: ensure_oidc_cert_dir() creates both ~/.ssh and cert dir
 @test "ensure_oidc_cert_dir creates ssh dir and cert dir" {
-    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_secure_dir ensure_oidc_cert_dir
     export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
     export CURRENT_LOG_LEVEL=3
     export HOME="$TEST_CONFIG_DIR"
@@ -531,6 +531,8 @@ _source_fn() {
 
 # Test: --oidc with missing OIDC config shows error
 @test "--oidc with missing OIDC config shows error" {
-    run env OIDC_ISSUER="" OIDC_CA_URL="" "$SMART_SSH" --dry-run --oidc test-host
+    run env OIDC_ISSUER="" OIDC_CA_URL="" \
+        OIDC_CERT_DIR="$TEST_CONFIG_DIR/empty-oidc-certs" \
+        "$SMART_SSH" --dry-run --oidc test-host
     [ "$status" -ne 0 ]
 }
