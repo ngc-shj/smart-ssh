@@ -8,6 +8,7 @@
 
 - **ホーム検出**: 信頼できるホームネットワークでは通常のSSH鍵を使用
 - **外出モード**: 外部ネットワークではセキュリティキー（FIDO2/WebAuthn）認証を要求
+- **OIDC Device Flow**: OIDC認証によるSSH証明書ベースの接続（セキュリティキー不要）
 - **クロスプラットフォーム**: Linux、macOS、WSL2で動作
 - **SSH設定対応**: `Include`ディレクティブや複雑なSSH設定を適切に処理
 - **複数ホームネットワーク**: 異なる識別子を持つ複数のホームロケーションをサポート
@@ -25,6 +26,7 @@
 
 - **ホームネットワーク**: 信頼できるネットワークからは通常の公開鍵認証で便利にアクセス
 - **外部ネットワーク**: 信頼できないネットワークからはセキュリティキー（YubiKeyなど）による強化認証
+- **OIDCモード**: セキュリティキーがない環境向けに、OIDC Device Flowで短寿命SSH証明書を取得
 - **サーバーサイド強制**: 実際のセキュリティはサーバー側で送信元IPに基づいて強制
 
 ## インストール
@@ -116,6 +118,17 @@ SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
 
 # ログレベル（debug、info、warn、error）
 LOG_LEVEL=info
+
+# OIDC Device Flow（オプション、証明書ベースSSH用）
+#OIDC_ENABLED=false
+#OIDC_ISSUER=https://accounts.example.com
+#OIDC_CLIENT_ID=smart-ssh-cli
+#OIDC_SCOPES=openid email
+#OIDC_CA_URL=https://ca.example.com
+#OIDC_CA_PROVISIONER=oidc
+#OIDC_CERT_LIFETIME=3600
+#OIDC_CERT_DIR=~/.ssh/oidc-certs
+#OIDC_AUTH_MODE=auto
 ```
 
 ### 2. 環境変数
@@ -247,6 +260,9 @@ smart-ssh --dry-run -- production -v -p 2222
 smart-ssh --security-key bastion
 smart-ssh -s web-server
 
+# OIDC Device Flow認証を強制（OIDC設定が必要）
+smart-ssh --oidc production
+
 # ドライランモード（接続せずに実行コマンドをプレビュー）
 smart-ssh --dry-run production
 smart-ssh -n staging
@@ -309,13 +325,61 @@ smart-ssh --debug
 | Linux            | `ip neigh` or `arp` | `ip route` or `ifconfig`         |
 | WSL2             | N/A                 | PowerShell `Get-NetIPAddress`    |
 
+## OIDC Device Flow認証
+
+ハードウェアセキュリティキーが利用できない環境（会社管理PCなど）向けに、smart-sshはOIDC Device Flow (RFC 8628) による短寿命SSH証明書の取得をサポートしています。
+
+### 仕組み
+
+1. smart-sshが外部ネットワークを検出し、OIDCが設定されている場合
+2. ターミナルにURLとコードが表示される
+3. 任意のデバイス（スマートフォン、タブレットなど）でURLを開き、コードを入力
+4. 承認後、CAから短寿命SSH証明書が自動取得される
+5. 証明書は有効期限内は再利用のためキャッシュされる
+
+### OIDC設定
+
+```bash
+# ~/.config/smart-ssh/config
+OIDC_ENABLED=true
+OIDC_ISSUER=https://accounts.example.com
+OIDC_CLIENT_ID=smart-ssh-cli
+OIDC_CA_URL=https://ca.example.com
+OIDC_AUTH_MODE=auto
+```
+
+### OIDC認証モード
+
+| モード | 動作 |
+| ---- | ---- |
+| `auto` | セキュリティキーファイルが存在しない場合にOIDCを使用。失敗時フォールバックなし |
+| `prefer` | OIDCを優先。ネットワーク/CAエラー時のみセキュリティキーにフォールバック |
+| `only` | OIDCのみ。フォールバックなし |
+| `disabled` | OIDC無効 |
+
+### OIDCの要件
+
+- JSONパース用の`jq`
+- HTTPリクエスト用の`curl`
+- Device Flowをサポートするのアイデンティティプロバイダー（Google、Keycloakなど）
+- OIDCプロビジョナー付きSSH認証局（例：step-ca）
+
+### OIDC強制
+
+`--oidc`でネットワーク検出や認証モードに関係なくOIDC認証を強制:
+
+```bash
+smart-ssh --oidc production
+```
+
 ## 使用例ワークフロー
 
 1. **Tailscaleホスト**: 通常のSSH鍵で接続（タッチ不要）
 2. **自宅（ゲートウェイMACが一致）**: 通常のSSH鍵で接続（タッチ不要）
 3. **カフェ（異なるゲートウェイ）**: セキュリティキーで接続（YubiKeyタッチ必要）
-4. **セキュリティキー強制**: `--security-key`オプションで常にセキュリティキーを使用
-5. **不明なネットワーク**: 認証方式を手動で選択するようプロンプト
+4. **会社PC（セキュリティキーなし）**: OIDC Device Flowで短寿命証明書を使用
+5. **セキュリティキー強制**: `--security-key`オプションで常にセキュリティキーを使用
+6. **不明なネットワーク**: 認証方式を手動で選択するようプロンプト
 
 ### 実際のシナリオ
 
@@ -436,11 +500,13 @@ bats -f "validate IP" tests/test_smart_ssh.bats
 - ドライランモード
 - デバッグモード
 - ヘルプと使用方法の出力
+- OIDC Device Flow（URL検証、依存関係チェック、認証モードロジック、証明書キャッシュ）
 
 ## 要件
 
 - セキュリティキーサポート付きSSHクライアント（OpenSSH 8.2+）
 - 外出時接続用のハードウェアセキュリティキー（YubiKeyなど）
+- オプション: OIDC Device Flow認証用の`jq`と`curl`
 - オプション: テスト実行用のbats-core
 
 ## トラブルシューティング

@@ -8,6 +8,7 @@ English | [日本語](README.ja.md)
 
 - **Home detection**: Uses regular SSH keys when connected to trusted home networks
 - **Away mode**: Requires security key (FIDO2/WebAuthn) authentication from external networks
+- **OIDC Device Flow**: Certificate-based SSH via OIDC authentication (no security key needed)
 - **Cross-platform**: Works on Linux, macOS, and WSL2
 - **SSH config aware**: Properly handles `Include` directives and complex SSH configurations
 - **Multiple home networks**: Support for multiple home locations with different identifiers
@@ -25,6 +26,7 @@ English | [日本語](README.ja.md)
 
 - **Home networks**: Convenient access with regular public key authentication from trusted networks
 - **External networks**: Enhanced security with mandatory security key (YubiKey, etc.) authentication from untrusted networks
+- **OIDC mode**: Short-lived SSH certificates via OIDC Device Flow for environments without security keys
 - **Server-side enforcement**: Actual security is enforced server-side based on source IP
 
 ## Installation
@@ -116,6 +118,17 @@ SECURITY_KEY_PATH=~/.ssh/id_ed25519_sk
 
 # Log level (debug, info, warn, error)
 LOG_LEVEL=info
+
+# OIDC Device Flow (optional, for certificate-based SSH)
+#OIDC_ENABLED=false
+#OIDC_ISSUER=https://accounts.example.com
+#OIDC_CLIENT_ID=smart-ssh-cli
+#OIDC_SCOPES=openid email
+#OIDC_CA_URL=https://ca.example.com
+#OIDC_CA_PROVISIONER=oidc
+#OIDC_CERT_LIFETIME=3600
+#OIDC_CERT_DIR=~/.ssh/oidc-certs
+#OIDC_AUTH_MODE=auto
 ```
 
 ### 2. Environment Variables
@@ -246,6 +259,9 @@ smart-ssh --dry-run -- production -v -p 2222
 smart-ssh --security-key bastion
 smart-ssh -s web-server
 
+# Force OIDC Device Flow authentication (requires OIDC configuration)
+smart-ssh --oidc production
+
 # Dry-run mode (preview what would be executed without connecting)
 smart-ssh --dry-run production
 smart-ssh -n staging
@@ -308,13 +324,61 @@ smart-ssh --debug
 | Linux    | `ip neigh` or `arp` | `ip route` or `ifconfig`         |
 | WSL2     | N/A                 | PowerShell `Get-NetIPAddress`    |
 
+## OIDC Device Flow Authentication
+
+For environments where a hardware security key is not available (e.g., company-managed PCs), smart-ssh supports OIDC Device Flow (RFC 8628) to obtain short-lived SSH certificates.
+
+### How it Works
+
+1. smart-ssh detects an external network and OIDC is configured
+2. A URL and code are displayed in the terminal
+3. Open the URL on any device (phone, tablet, etc.) and enter the code
+4. After approval, a short-lived SSH certificate is automatically obtained from the CA
+5. The certificate is cached for reuse until it expires
+
+### OIDC Configuration
+
+```bash
+# ~/.config/smart-ssh/config
+OIDC_ENABLED=true
+OIDC_ISSUER=https://accounts.example.com
+OIDC_CLIENT_ID=smart-ssh-cli
+OIDC_CA_URL=https://ca.example.com
+OIDC_AUTH_MODE=auto
+```
+
+### OIDC Auth Modes
+
+| Mode | Behavior |
+| ---- | -------- |
+| `auto` | Use OIDC when security key file is absent; no fallback on failure |
+| `prefer` | Prefer OIDC; fall back to security key on network/CA error only |
+| `only` | OIDC only; no fallback |
+| `disabled` | OIDC disabled |
+
+### OIDC Requirements
+
+- `jq` for JSON parsing
+- `curl` for HTTP requests
+- An OIDC provider supporting Device Flow (Google, Keycloak, etc.)
+- An SSH Certificate Authority (e.g., step-ca) with OIDC provisioner
+
+### Force OIDC
+
+Use `--oidc` to force OIDC authentication regardless of network detection or auth mode:
+
+```bash
+smart-ssh --oidc production
+```
+
 ## Example Workflow
 
 1. **Tailscale host**: Connects using regular SSH key (no touch required)
 2. **At home (gateway MAC matches)**: Connects using regular SSH key (no touch required)
 3. **At coffee shop (different gateway)**: Connects using security key (YubiKey touch required)
-4. **Force security key**: Use `--security-key` option to always use security key
-5. **Unknown network**: Prompts user to manually choose authentication method
+4. **Company PC (no security key)**: OIDC Device Flow with short-lived certificate
+5. **Force security key**: Use `--security-key` option to always use security key
+6. **Unknown network**: Prompts user to manually choose authentication method
 
 ### Real-world scenarios:
 - `smart-ssh production` - Deploy to production server
@@ -434,11 +498,13 @@ bats -f "validate IP" tests/test_smart_ssh.bats
 - Dry-run mode
 - Debug mode
 - Help and usage output
+- OIDC Device Flow (URL validation, dependency checks, auth mode logic, certificate caching)
 
 ## Requirements
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
+- Optional: `jq` and `curl` for OIDC Device Flow authentication
 - Optional: bats-core for running tests
 
 ## Troubleshooting
