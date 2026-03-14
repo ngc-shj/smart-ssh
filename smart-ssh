@@ -810,7 +810,8 @@ oidc_poll_token() {
         return 2
     }
     _cleanup_poll() { rm -f "$poll_data_file"; }
-    trap '_cleanup_poll' INT TERM
+    local _poll_interrupted=false
+    trap '_cleanup_poll; _poll_interrupted=true' INT TERM
     # Percent-encode values per RFC 3986 (application/x-www-form-urlencoded)
     {
         printf 'grant_type=%s' "urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
@@ -825,11 +826,23 @@ oidc_poll_token() {
     }
 
     while [ "$elapsed" -lt "$timeout" ]; do
+        # Check if interrupted by INT/TERM signal
+        if [ "$_poll_interrupted" = true ]; then
+            log_error "Token polling interrupted"
+            return 2
+        fi
+
         # NOTE: _OIDC_POLL_INTERVAL_OVERRIDE is for testing only; it bypasses
         # slow_down enforcement. Must not be set in production.
         local sleep_time="${_OIDC_POLL_INTERVAL_OVERRIDE:-$current_interval}"
 
         sleep "$sleep_time"
+
+        # Check again after sleep (signal most likely arrives during sleep)
+        if [ "$_poll_interrupted" = true ]; then
+            log_error "Token polling interrupted"
+            return 2
+        fi
         # Ensure elapsed always advances to prevent infinite loop
         local increment=$(( sleep_time > 0 ? sleep_time : 1 ))
         elapsed=$((elapsed + increment))
@@ -843,15 +856,15 @@ oidc_poll_token() {
             -d @"$poll_data_file" 2>&1)
         local curl_exit=$?
 
+        # Extract HTTP status code (last line) and response body
+        http_code=$(echo "$response" | tail -1)
+        response=$(echo "$response" | sed '$d')
+
         # Network-level error (curl itself failed)
         if [ $curl_exit -ne 0 ]; then
             log_error "Token poll request failed: $response"
             _cleanup_poll; return 2
         fi
-
-        # Extract HTTP status code (last line) and response body
-        http_code=$(echo "$response" | tail -1)
-        response=$(echo "$response" | sed '$d')
 
         # Validate http_code is numeric
         if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
@@ -982,14 +995,14 @@ oidc_get_certificate() {
     local curl_exit=$?
     rm -f "$body_file"
 
+    # Extract HTTP status code (last line) and response body
+    local http_code="${response##*$'\n'}"
+    response="${response%$'\n'*}"
+
     if [ $curl_exit -ne 0 ]; then
         log_error "CA certificate request failed: $response"
         _cleanup_ephemeral; return 2
     fi
-
-    # Extract HTTP status code (last line) and response body
-    local http_code="${response##*$'\n'}"
-    response="${response%$'\n'*}"
 
     if [ "${http_code:-0}" != "200" ] && [ "${http_code:-0}" != "201" ]; then
         log_error "CA returned HTTP $http_code: $response"

@@ -39,11 +39,11 @@ teardown() {
     [[ "$output" =~ "--help" ]]
 }
 
-# Test: Invalid option
+# Test: Invalid option (treated as SSH option, but no hostname → error)
 @test "smart-ssh with invalid option shows error" {
     run "$SMART_SSH" --invalid-option
     [ "$status" -eq 1 ]
-    [[ "$output" =~ "Unknown option" ]]
+    [[ "$output" =~ "Please specify a hostname" ]]
 }
 
 # Test: No hostname argument
@@ -70,10 +70,22 @@ teardown() {
     grep -q "LOG_LEVEL=" "$CONFIG_FILE"
 }
 
+# Helper: source functions from smart-ssh via temp file (bash 3.2 compatible)
+# Usage: _source_fn func_name [func_name ...]
+_source_fn() {
+    local _tmp
+    _tmp=$(mktemp)
+    for _fn in "$@"; do
+        sed -n "/^${_fn}()/,/^}/p" "$SMART_SSH" >> "$_tmp"
+    done
+    # shellcheck disable=SC1090
+    source "$_tmp"
+    rm -f "$_tmp"
+}
+
 # Test: IP address validation (helper function test)
 @test "validate IP address format" {
-    # Source functions from script
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip
 
     # Valid IPs
     run validate_ip "192.168.1.1"
@@ -95,10 +107,7 @@ teardown() {
 
 # Test: CIDR validation
 @test "validate CIDR format" {
-    # Source necessary functions
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^print_error()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^validate_cidr()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip print_error validate_cidr
     export COLOR_RED='' COLOR_RESET=''
 
     # Valid CIDR
@@ -119,8 +128,7 @@ teardown() {
 
 # Test: IP to integer conversion
 @test "convert IP to integer" {
-    # Source the function
-    source <(sed -n '/^ip_to_int()/,/^}/p' "$SMART_SSH")
+    _source_fn ip_to_int
 
     result=$(ip_to_int "192.168.1.1")
     [ "$result" -eq 3232235777 ]
@@ -199,11 +207,7 @@ teardown() {
 
 # Test: Tailscale CGNAT IP range detection
 @test "Tailscale CGNAT IP range (100.64.0.0/10) is detected" {
-    source <(sed -n '/^validate_ip()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^print_error()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^validate_cidr()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^ip_to_int()/,/^}/p' "$SMART_SSH")
-    source <(sed -n '/^ip_in_cidr()/,/^}/p' "$SMART_SSH")
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr
     export COLOR_RED='' COLOR_RESET=''
 
     # Tailscale IPs (100.64.0.0/10 = 100.64.0.0 - 100.127.255.255)
@@ -255,19 +259,6 @@ teardown() {
 # ============================================================
 # OIDC Tests
 # ============================================================
-
-# Helper: source functions from smart-ssh via temp file (bash 3.2 compatible)
-# Usage: _source_fn func_name [func_name ...]
-_source_fn() {
-    local _tmp
-    _tmp=$(mktemp)
-    for _fn in "$@"; do
-        sed -n "/^${_fn}()/,/^}/p" "$SMART_SSH" >> "$_tmp"
-    done
-    # shellcheck disable=SC1090
-    source "$_tmp"
-    rm -f "$_tmp"
-}
 
 # Test: Config file contains OIDC keys
 @test "config file contains OIDC keys" {
