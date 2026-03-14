@@ -500,18 +500,33 @@ _source_fn() {
     [ "$ret" -eq 1 ]
 }
 
-# Test: oidc_check_cached_cert() returns 1 when cert exists but key missing
-@test "oidc_check_cached_cert returns 1 when only cert exists" {
-    _source_fn print_error print_debug log_error log_debug oidc_check_cached_cert
-    export COLOR_RED='' COLOR_BLUE='' COLOR_RESET=''
+# Test: ensure_oidc_cert_dir() rejects symlink on ~/.ssh itself
+@test "ensure_oidc_cert_dir rejects symlink on ssh dir" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
     export CURRENT_LOG_LEVEL=3
-    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
-    mkdir -p "$OIDC_CERT_DIR"
-    # Create only the cert file, no key
-    touch "$OIDC_CERT_DIR/id_oidc-cert.pub"
+    export HOME="$TEST_CONFIG_DIR"
+    # Create ~/.ssh as a symlink
+    ln -s /tmp "$TEST_CONFIG_DIR/.ssh"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
 
-    ret=0; oidc_check_cached_cert 2>/dev/null || ret=$?
+    ret=0; ensure_oidc_cert_dir 2>/dev/null || ret=$?
     [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_oidc_cert_dir() creates both ~/.ssh and cert dir
+@test "ensure_oidc_cert_dir creates ssh dir and cert dir" {
+    _source_fn print_error print_warning print_debug log_error log_warn log_debug ensure_oidc_cert_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export HOME="$TEST_CONFIG_DIR"
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/.ssh/oidc-certs"
+    # Neither ~/.ssh nor cert dir exist
+
+    ensure_oidc_cert_dir 2>/dev/null
+    [ "$?" -eq 0 ]
+    [ -d "$TEST_CONFIG_DIR/.ssh" ]
+    [ -d "$OIDC_CERT_DIR" ]
 }
 
 # Test: --oidc with missing OIDC config shows error

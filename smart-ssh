@@ -802,7 +802,10 @@ oidc_poll_token() {
         # authorization_pending/slow_down which are expected responses
         # Write POST body to temp file to avoid cmdline exposure of client_secret
         local poll_data_file
-        poll_data_file=$(umask 077 && mktemp)
+        poll_data_file=$(umask 077 && mktemp) || {
+            log_error "Failed to create temp file for token poll"
+            return 2
+        }
         {
             printf 'grant_type=%s' "urn:ietf:params:oauth:grant-type:device_code"
             printf '&device_code=%s' "${_OIDC_DEVICE_CODE}"
@@ -810,7 +813,11 @@ oidc_poll_token() {
             if [ -n "$OIDC_CLIENT_SECRET" ]; then
                 printf '&client_secret=%s' "${OIDC_CLIENT_SECRET}"
             fi
-        } > "$poll_data_file"
+        } > "$poll_data_file" || {
+            log_error "Failed to write token poll body"
+            rm -f "$poll_data_file"
+            return 2
+        }
 
         local response http_code
         response=$(curl --silent --show-error --max-time 30 --connect-timeout 10 \
@@ -992,7 +999,7 @@ oidc_get_certificate() {
     if ! [[ "$cert" =~ ^[a-z].*-cert- ]]; then
         # step-ca returns raw base64 wire format; decode to extract cert type
         local cert_type
-        cert_type=$(echo "$cert" | base64 -d 2>/dev/null | head -c 100 | strings | head -1)
+        cert_type=$(echo "$cert" | base64 -d 2>/dev/null | head -c 100 | tr -dc '[:print:]' | head -1)
         if [[ "$cert_type" =~ -cert- ]]; then
             cert="${cert_type} ${cert}"
         else
@@ -1100,12 +1107,18 @@ ensure_oidc_cert_dir() {
         return 1
     fi
 
-    # Create OIDC cert directory
+    # Create OIDC cert directory, or validate permissions if it exists
     if [ ! -e "$OIDC_CERT_DIR" ]; then
         mkdir -m 700 "$OIDC_CERT_DIR" || {
             log_error "Failed to create OIDC cert directory: $OIDC_CERT_DIR"
             return 1
         }
+    elif [ -d "$OIDC_CERT_DIR" ]; then
+        local cert_dir_perms
+        cert_dir_perms=$(stat -f '%Lp' "$OIDC_CERT_DIR" 2>/dev/null || stat -c '%a' "$OIDC_CERT_DIR" 2>/dev/null)
+        if [ -n "$cert_dir_perms" ] && [ "$cert_dir_perms" != "700" ]; then
+            log_warn "$OIDC_CERT_DIR has permissions $cert_dir_perms (expected 700)"
+        fi
     fi
 
     if [ ! -d "$OIDC_CERT_DIR" ]; then
