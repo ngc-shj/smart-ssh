@@ -489,9 +489,15 @@ _source_fn() {
     ensure_oidc_cert_dir 2>/dev/null
     [ "$?" -eq 0 ]
     [ -d "$OIDC_CERT_DIR" ]
-    # Verify directory permissions are 700
+    # Verify directory permissions are 700 (portable across macOS/Linux)
     local perms
-    perms=$(stat -f '%Lp' "$OIDC_CERT_DIR" 2>/dev/null || stat -c '%a' "$OIDC_CERT_DIR" 2>/dev/null)
+    if stat -c '%a' /dev/null >/dev/null 2>&1; then
+        # GNU stat (Linux)
+        perms=$(stat -c '%a' "$OIDC_CERT_DIR")
+    else
+        # BSD stat (macOS)
+        perms=$(stat -f '%Lp' "$OIDC_CERT_DIR")
+    fi
     [ "$perms" = "700" ]
 }
 
