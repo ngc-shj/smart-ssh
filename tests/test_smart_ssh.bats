@@ -850,3 +850,452 @@ MOCK_TS
     run bash "$test_script"
     [ "$status" -eq 1 ]
 }
+
+# ============================================================
+# get_log_level_number Tests
+# ============================================================
+
+# Test: get_log_level_number returns 0 for debug
+@test "get_log_level_number returns 0 for debug" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="debug"
+    result=$(get_log_level_number)
+    [ "$result" -eq 0 ]
+}
+
+# Test: get_log_level_number returns 1 for info
+@test "get_log_level_number returns 1 for info" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="info"
+    result=$(get_log_level_number)
+    [ "$result" -eq 1 ]
+}
+
+# Test: get_log_level_number returns 2 for warn
+@test "get_log_level_number returns 2 for warn" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="warn"
+    result=$(get_log_level_number)
+    [ "$result" -eq 2 ]
+}
+
+# Test: get_log_level_number returns 3 for error
+@test "get_log_level_number returns 3 for error" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="error"
+    result=$(get_log_level_number)
+    [ "$result" -eq 3 ]
+}
+
+# Test: get_log_level_number is case-insensitive (uppercase)
+@test "get_log_level_number is case-insensitive for uppercase input" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="DEBUG"
+    result=$(get_log_level_number)
+    [ "$result" -eq 0 ]
+
+    LOG_LEVEL="WARN"
+    result=$(get_log_level_number)
+    [ "$result" -eq 2 ]
+}
+
+# Test: get_log_level_number returns 1 for unknown level
+@test "get_log_level_number returns 1 for unknown level" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL="verbose"
+    result=$(get_log_level_number)
+    [ "$result" -eq 1 ]
+}
+
+# Test: get_log_level_number returns 1 for empty log level
+@test "get_log_level_number returns 1 for empty log level" {
+    _source_fn get_log_level_number
+    export LOG_LEVEL_DEBUG=0
+    export LOG_LEVEL_INFO=1
+    export LOG_LEVEL_WARN=2
+    export LOG_LEVEL_ERROR=3
+
+    LOG_LEVEL=""
+    result=$(get_log_level_number)
+    [ "$result" -eq 1 ]
+}
+
+# ============================================================
+# is_home_gateway_mac Tests
+# ============================================================
+
+# Test: is_home_gateway_mac matches single MAC address
+@test "is_home_gateway_mac matches single MAC address" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
+    run is_home_gateway_mac "aa:bb:cc:dd:ee:ff"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_home_gateway_mac is case-insensitive
+@test "is_home_gateway_mac is case-insensitive" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="AA:BB:CC:DD:EE:FF"
+    run is_home_gateway_mac "aa:bb:cc:dd:ee:ff"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_home_gateway_mac matches from comma-separated list
+@test "is_home_gateway_mac matches from comma-separated list" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="11:22:33:44:55:66,aa:bb:cc:dd:ee:ff,77:88:99:00:aa:bb"
+    run is_home_gateway_mac "aa:bb:cc:dd:ee:ff"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_home_gateway_mac returns 1 for non-matching MAC
+@test "is_home_gateway_mac returns 1 for non-matching MAC" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
+    run is_home_gateway_mac "11:22:33:44:55:66"
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_gateway_mac returns 1 when current_mac is empty
+@test "is_home_gateway_mac returns 1 when current_mac is empty" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="aa:bb:cc:dd:ee:ff"
+    run is_home_gateway_mac ""
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_gateway_mac returns 1 when HOME_GATEWAY_MAC is empty
+@test "is_home_gateway_mac returns 1 when HOME_GATEWAY_MAC is empty" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC=""
+    run is_home_gateway_mac "aa:bb:cc:dd:ee:ff"
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_gateway_mac handles whitespace around MACs in list
+@test "is_home_gateway_mac handles whitespace around MACs in list" {
+    _source_fn is_home_gateway_mac
+
+    HOME_GATEWAY_MAC="11:22:33:44:55:66 , aa:bb:cc:dd:ee:ff"
+    run is_home_gateway_mac "aa:bb:cc:dd:ee:ff"
+    [ "$status" -eq 0 ]
+}
+
+# ============================================================
+# is_home_network Tests
+# ============================================================
+
+# Test: is_home_network returns 0 for IP within home network
+@test "is_home_network returns 0 for IP within home network" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK="192.168.1.0/24"
+    run is_home_network "192.168.1.100"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_home_network returns 1 for IP outside home network
+@test "is_home_network returns 1 for IP outside home network" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK="192.168.1.0/24"
+    run is_home_network "10.0.0.1"
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_network matches from comma-separated network list
+@test "is_home_network matches from comma-separated network list" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK="192.168.1.0/24,10.0.0.0/8"
+    run is_home_network "10.5.5.5"
+    [ "$status" -eq 0 ]
+}
+
+# Test: is_home_network returns 1 for NOT_CONNECTED
+@test "is_home_network returns 1 for NOT_CONNECTED" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK="192.168.1.0/24"
+    run is_home_network "NOT_CONNECTED"
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_network returns 1 for empty IP
+@test "is_home_network returns 1 for empty IP" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK="192.168.1.0/24"
+    run is_home_network ""
+    [ "$status" -eq 1 ]
+}
+
+# Test: is_home_network handles network ranges with spaces
+@test "is_home_network handles network ranges with surrounding spaces" {
+    _source_fn validate_ip print_error validate_cidr ip_to_int ip_in_cidr is_home_network
+    export COLOR_RED='' COLOR_RESET=''
+
+    HOME_NETWORK=" 192.168.1.0/24 , 10.0.0.0/8 "
+    run is_home_network "192.168.1.50"
+    [ "$status" -eq 0 ]
+}
+
+# ============================================================
+# ensure_secure_dir Tests
+# ============================================================
+
+# Test: ensure_secure_dir creates directory with 700 permissions
+@test "ensure_secure_dir creates directory with 700 permissions" {
+    _source_fn print_error print_warning log_error log_warn ensure_secure_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    local test_dir="$TEST_CONFIG_DIR/secure_test_dir"
+    ensure_secure_dir "$test_dir" 2>/dev/null
+    [ "$?" -eq 0 ]
+    [ -d "$test_dir" ]
+
+    local perms
+    if stat -c '%a' /dev/null >/dev/null 2>&1; then
+        perms=$(stat -c '%a' "$test_dir")
+    else
+        perms=$(stat -f '%Lp' "$test_dir")
+    fi
+    [ "$perms" = "700" ]
+}
+
+# Test: ensure_secure_dir returns 1 when path is a symlink
+@test "ensure_secure_dir returns 1 when path is a symlink" {
+    _source_fn print_error print_warning log_error log_warn ensure_secure_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    local link_path="$TEST_CONFIG_DIR/sym_secure_dir"
+    ln -s /tmp "$link_path"
+
+    ret=0; ensure_secure_dir "$link_path" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# Test: ensure_secure_dir returns 0 for existing directory with correct permissions
+@test "ensure_secure_dir returns 0 for existing 700 directory" {
+    _source_fn print_error print_warning log_error log_warn ensure_secure_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    local test_dir="$TEST_CONFIG_DIR/already_secure"
+    mkdir -m 700 "$test_dir"
+
+    ensure_secure_dir "$test_dir" 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: ensure_secure_dir returns 1 when path exists as a regular file
+@test "ensure_secure_dir returns 1 when path is a regular file" {
+    _source_fn print_error print_warning log_error log_warn ensure_secure_dir
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    local file_path="$TEST_CONFIG_DIR/not_a_dir"
+    touch "$file_path"
+
+    ret=0; ensure_secure_dir "$file_path" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
+# ============================================================
+# load_config Tests
+# ============================================================
+
+# Test: load_config reads HOME_NETWORK from config file
+@test "load_config reads HOME_NETWORK from config file" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'HOME_NETWORK=10.10.0.0/16\n' > "$CONFIG_FILE"
+
+    unset CONFIG_HOME_NETWORK
+    load_config
+
+    [ "$CONFIG_HOME_NETWORK" = "10.10.0.0/16" ]
+}
+
+# Test: load_config reads HOME_GATEWAY_MAC from config file
+@test "load_config reads HOME_GATEWAY_MAC from config file" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff\n' > "$CONFIG_FILE"
+
+    unset CONFIG_HOME_GATEWAY_MAC
+    load_config
+
+    [ "$CONFIG_HOME_GATEWAY_MAC" = "aa:bb:cc:dd:ee:ff" ]
+}
+
+# Test: load_config reads LOG_LEVEL from config file
+@test "load_config reads LOG_LEVEL from config file" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'LOG_LEVEL=debug\n' > "$CONFIG_FILE"
+
+    unset CONFIG_LOG_LEVEL
+    load_config
+
+    [ "$CONFIG_LOG_LEVEL" = "debug" ]
+}
+
+# Test: load_config skips comment lines
+@test "load_config skips comment lines" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf '# This is a comment\nHOME_NETWORK=172.16.0.0/12\n' > "$CONFIG_FILE"
+
+    unset CONFIG_HOME_NETWORK
+    load_config
+
+    [ "$CONFIG_HOME_NETWORK" = "172.16.0.0/12" ]
+}
+
+# Test: load_config strips double quotes from values
+@test "load_config strips double quotes from values" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'HOME_NETWORK="192.168.2.0/24"\n' > "$CONFIG_FILE"
+
+    unset CONFIG_HOME_NETWORK
+    load_config
+
+    [ "$CONFIG_HOME_NETWORK" = "192.168.2.0/24" ]
+}
+
+# Test: load_config strips single quotes from values
+@test "load_config strips single quotes from values" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf "HOME_NETWORK='192.168.3.0/24'\n" > "$CONFIG_FILE"
+
+    unset CONFIG_HOME_NETWORK
+    load_config
+
+    [ "$CONFIG_HOME_NETWORK" = "192.168.3.0/24" ]
+}
+
+# Test: load_config does nothing when config file is absent
+@test "load_config does nothing when config file is absent" {
+    _source_fn load_config
+    # CONFIG_FILE is set in setup() but the file doesn't exist yet
+
+    unset CONFIG_HOME_NETWORK
+    load_config
+
+    # Variable should remain unset
+    [ -z "${CONFIG_HOME_NETWORK+x}" ] || [ -z "$CONFIG_HOME_NETWORK" ]
+}
+
+# Test: load_config reads OIDC_ENABLED from config file
+@test "load_config reads OIDC_ENABLED from config file" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'OIDC_ENABLED=true\n' > "$CONFIG_FILE"
+
+    unset CONFIG_OIDC_ENABLED
+    load_config
+
+    [ "$CONFIG_OIDC_ENABLED" = "true" ]
+}
+
+# Test: load_config reads TAILSCALE_AS_HOME from config file
+@test "load_config reads TAILSCALE_AS_HOME from config file" {
+    _source_fn load_config
+    mkdir -p "$CONFIG_DIR"
+    printf 'TAILSCALE_AS_HOME=false\n' > "$CONFIG_FILE"
+
+    unset CONFIG_TAILSCALE_AS_HOME
+    load_config
+
+    [ "$CONFIG_TAILSCALE_AS_HOME" = "false" ]
+}
+
+# ============================================================
+# check_ssh_config Tests
+# ============================================================
+
+# Test: check_ssh_config returns 0 for known host in SSH config
+@test "check_ssh_config returns 0 when SSH config exists for hostname" {
+    _source_fn check_ssh_config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host test-known-host\n    HostName example.com\n    User testuser\n' \
+        > "$HOME/.ssh/config"
+
+    check_ssh_config "test-known-host" 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: check_ssh_config returns 1 when ssh -G fails (no config at all)
+@test "check_ssh_config returns 1 when ssh -G fails" {
+    _source_fn check_ssh_config
+
+    # Override ssh to always fail
+    ssh() { return 1; }
+    export -f ssh
+
+    ret=0; check_ssh_config "nonexistent-host-xyz" 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+
+    unset -f ssh
+}
+
+# Test: check_ssh_config outputs warning message on failure
+@test "check_ssh_config outputs warning when host not found" {
+    _source_fn check_ssh_config
+
+    ssh() { return 1; }
+    export -f ssh
+
+    run check_ssh_config "missing-host" 2>&1
+    [ "$status" -eq 1 ]
+    [[ "$output" =~ "Warning" ]] || [[ "$output" =~ "missing-host" ]]
+
+    unset -f ssh
+}
