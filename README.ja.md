@@ -48,14 +48,22 @@ sudo install -m 755 /tmp/smart-ssh /usr/local/bin/smart-ssh
 smart-ssh --help
 ```
 
-### オプション2: 開発版インストール
-
-> **警告**: このインストール方法は最新のHEADからインストールするため、バージョンが固定されません。開発目的のみに使用してください。
+### オプション2: ユーザーローカルインストール（sudo不要）
 
 ```bash
-# /usr/local/binにダウンロードしてインストール
-curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh | sudo tee /usr/local/bin/smart-ssh > /dev/null
-sudo chmod +x /usr/local/bin/smart-ssh
+# ローカルbinディレクトリを作成（存在しない場合）
+mkdir -p ~/.local/bin
+
+# リリースバイナリとチェックサムをダウンロード
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh -o ~/.local/bin/smart-ssh
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh.sha256 -o /tmp/smart-ssh.sha256
+
+# 実行権限を付ける前にチェックサムを検証
+(cd /tmp && sha256sum -c smart-ssh.sha256)
+chmod +x ~/.local/bin/smart-ssh
+
+# PATHに追加（まだの場合、~/.bashrcまたは~/.zshrcに追加）
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # または ~/.zshrc
 
 # インストール確認
 smart-ssh --help
@@ -83,22 +91,17 @@ cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
 smart-ssh --help
 ```
 
-### オプション4: ユーザーローカルインストール（sudo不要）
+### オプション4: 開発版インストール
+
+> **警告**: 開発版は未検証の raw URL からではなく、レビュー済みの checkout から使ってください。
 
 ```bash
-# ローカルbinディレクトリを作成（存在しない場合）
-mkdir -p ~/.local/bin
+git clone https://github.com/ngc-shj/smart-ssh.git
+cd smart-ssh
+git checkout v1.0.0   # またはレビュー済みのブランチ/コミット
 
-# ダウンロードしてインストール
-curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh -o ~/.local/bin/smart-ssh
-chmod +x ~/.local/bin/smart-ssh
-
-# PATHに追加（まだの場合、~/.bashrcまたは~/.zshrcに追加）
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # または ~/.zshrc
-source ~/.bashrc  # または source ~/.zshrc
-
-# インストール確認
-smart-ssh --help
+# checkout から直接実行するか、レビュー済みのローカルファイルをインストール
+./smart-ssh --help
 ```
 
 ## 設定

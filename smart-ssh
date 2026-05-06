@@ -29,6 +29,14 @@ DEFAULT_OIDC_CERT_LIFETIME="3600"
 DEFAULT_OIDC_CERT_DIR="$HOME/.ssh/oidc-certs"
 DEFAULT_OIDC_AUTH_MODE="auto"
 
+# Trim leading and trailing whitespace without spawning external tools.
+trim_whitespace() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s\n' "$value"
+}
+
 # Load configuration from file if it exists
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
@@ -39,8 +47,8 @@ load_config() {
             [[ -z "$key" ]] && continue
 
             # Remove leading/trailing whitespace
-            key=$(echo "$key" | xargs)
-            value=$(echo "$value" | xargs)
+            key=$(trim_whitespace "$key")
+            value=$(trim_whitespace "$value")
 
             # Remove quotes from value if present
             value="${value%\"}"
@@ -82,6 +90,54 @@ load_config() {
 
 # Load configuration
 load_config
+
+# Print SSH host aliases from ~/.ssh/config and supported Include files.
+# Wildcard Host patterns are skipped because smart-ssh expects concrete aliases.
+_list_ssh_hosts_from_file() {
+    local config_file="$1"
+
+    [ -f "$config_file" ] || return 0
+
+    local line trimmed directive directive_lower rest include
+    while IFS= read -r line || [ -n "$line" ]; do
+        trimmed=$(trim_whitespace "$line")
+        [[ -z "$trimmed" ]] && continue
+        [[ "$trimmed" == \#* ]] && continue
+
+        directive="${trimmed%%[[:space:]]*}"
+        rest=""
+        if [ "$directive" != "$trimmed" ]; then
+            rest=$(trim_whitespace "${trimmed#"$directive"}")
+        fi
+
+        directive_lower=$(printf '%s' "$directive" | tr '[:upper:]' '[:lower:]')
+
+        case "$directive_lower" in
+            host)
+                local host_alias
+                for host_alias in $rest; do
+                    [[ "$host_alias" == *[\*\?\!]* ]] && continue
+                    printf '%s\n' "$host_alias"
+                done
+                ;;
+            include)
+                local include_pattern
+                for include_pattern in $rest; do
+                    include_pattern="${include_pattern/#\~/$HOME}"
+                    while IFS= read -r include; do
+                        [ -n "$include" ] || continue
+                        _list_ssh_hosts_from_file "$include"
+                    done < <(compgen -G "$include_pattern")
+                done
+                ;;
+        esac
+    done < "$config_file"
+}
+
+list_ssh_hosts() {
+    local config_file="${1:-$HOME/.ssh/config}"
+    _list_ssh_hosts_from_file "$config_file" | sort -u
+}
 
 # Configuration priority: Environment variable > Config file > Default
 # Home networks (can be overridden by environment variable, comma-separated)
@@ -840,6 +896,14 @@ oidc_device_authorize() {
     print_info "Enter this code: $_OIDC_USER_CODE"
     print_info "=================================="
     echo ""
+
+    # Attempt to open the verification URL in the default browser
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$_OIDC_VERIFICATION_URI" >/dev/null 2>&1 &
+    elif command -v open >/dev/null 2>&1; then
+        open "$_OIDC_VERIFICATION_URI" >/dev/null 2>&1 &
+    fi
+
     return 0
 }
 
@@ -1101,13 +1165,16 @@ oidc_get_certificate() {
         fi
     fi
 
-    # Save certificate and private key with secure permissions
-    (umask 077 && printf '%s\n' "$cert" > "$cert_file") || {
-        log_error "Failed to write certificate file: $cert_file"
-        _cleanup_ephemeral; return 2
-    }
+    # Save private key first, then certificate — if interrupted between the two
+    # writes, the fingerprint check in oidc_check_cached_cert() will detect the
+    # mismatch and trigger a fresh issuance instead of using a stale pair.
     (umask 077 && cp "$temp_key" "$key_file") || {
         log_error "Failed to write key file: $key_file"
+        _cleanup_ephemeral; return 2
+    }
+    (umask 077 && printf '%s\n' "$cert" > "$cert_file") || {
+        log_error "Failed to write certificate file: $cert_file"
+        rm -f "$key_file"
         _cleanup_ephemeral; return 2
     }
     chmod 600 "$cert_file" "$key_file"
@@ -1133,6 +1200,15 @@ oidc_check_cached_cert() {
 
     if [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
         log_debug "No cached OIDC certificate or key found"
+        return 1
+    fi
+
+    # Verify certificate matches the private key (fingerprint comparison)
+    local cert_fp key_fp
+    cert_fp=$(ssh-keygen -L -f "$cert_file" 2>/dev/null | grep "Public key:" | awk '{print $NF}')
+    key_fp=$(ssh-keygen -l -f "$key_file" 2>/dev/null | awk '{print $2}')
+    if [ -z "$cert_fp" ] || [ -z "$key_fp" ] || [ "$cert_fp" != "$key_fp" ]; then
+        log_debug "Cached certificate does not match private key (cert=$cert_fp key=$key_fp)"
         return 1
     fi
 
@@ -1317,13 +1393,12 @@ ssh_with_oidc() {
 # Check SSH configuration exists (single host entry)
 check_ssh_config() {
     local hostname="$1"
-    
-    # Use ssh -G to get actual configuration (handles Include directives)
-    if ! ssh -G "$hostname" >/dev/null 2>&1; then
+
+    if ! list_ssh_hosts | grep -Fx -- "$hostname" >/dev/null 2>&1; then
         echo "Warning: SSH configuration for '$hostname' not found"
         return 1
     fi
-    
+
     return 0
 }
 
@@ -1784,33 +1859,7 @@ debug_info() {
         echo "$HOME/.ssh/config exists"
         echo "Available host entries (including Include directives):"
 
-        # Parse SSH config including Include directives (same logic as completions)
-        awk '
-            /^Include / {
-                # Expand ~ to HOME directory
-                include_path = $2
-                gsub(/^~/, ENVIRON["HOME"], include_path)
-                # Handle glob patterns
-                cmd = "ls -1 " include_path " 2>/dev/null"
-                while ((cmd | getline file) > 0) {
-                    while ((getline line < file) > 0) {
-                        if (line ~ /^Host /) {
-                            split(line, parts)
-                            for (i = 2; i <= length(parts); i++) {
-                                print parts[i]
-                            }
-                        }
-                    }
-                    close(file)
-                }
-                close(cmd)
-            }
-            /^Host / {
-                for (i = 2; i <= NF; i++) {
-                    print $i
-                }
-            }
-        ' ~/.ssh/config 2>/dev/null | grep -v "[*?!]" | sort -u | head -20 || echo "  No Host entries found"
+        list_ssh_hosts | head -20 || echo "  No Host entries found"
     else
         echo "$HOME/.ssh/config does not exist"
     fi
@@ -1819,6 +1868,9 @@ debug_info() {
 
 # Handle options and arguments
 case "$1" in
+    --list-hosts)
+        list_ssh_hosts
+        ;;
     --debug|-d)
         debug_info
         ;;

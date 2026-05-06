@@ -4,43 +4,7 @@
 
 # Get SSH hosts from config, respecting Include directives
 _smart_ssh_get_hosts() {
-    local config_file="${1:-$HOME/.ssh/config}"
-    local hosts=""
-
-    # Use ssh's native config parser to handle Include directives
-    # ssh -G lists all configuration for a dummy host, including expanded config
-    if command -v ssh >/dev/null 2>&1; then
-        # Extract Host entries from the actual config file and included files
-        # Parse the main config and any included configs
-        hosts=$(awk '
-            /^Include / {
-                # Expand ~ to HOME directory
-                include_path = $2
-                gsub(/^~/, ENVIRON["HOME"], include_path)
-                # Handle glob patterns
-                cmd = "ls -1 " include_path " 2>/dev/null"
-                while ((cmd | getline file) > 0) {
-                    while ((getline line < file) > 0) {
-                        if (line ~ /^Host /) {
-                            split(line, parts)
-                            for (i = 2; i <= length(parts); i++) {
-                                print parts[i]
-                            }
-                        }
-                    }
-                    close(file)
-                }
-                close(cmd)
-            }
-            /^Host / {
-                for (i = 2; i <= NF; i++) {
-                    print $i
-                }
-            }
-        ' "$config_file" 2>/dev/null | grep -v "[*?!]" | sort -u)
-    fi
-
-    echo "$hosts"
+    command smart-ssh --list-hosts 2>/dev/null
 }
 
 _smart_ssh_completion() {
