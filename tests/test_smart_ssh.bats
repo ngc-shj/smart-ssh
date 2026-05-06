@@ -454,6 +454,31 @@ _source_fn() {
     [ "$ret" -eq 1 ]
 }
 
+# Test: oidc_check_cached_cert() returns 1 when cert/key fingerprints mismatch
+@test "oidc_check_cached_cert returns 1 when cert and key fingerprints mismatch" {
+    _source_fn print_error print_debug log_error log_debug oidc_check_cached_cert
+    export COLOR_RED='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$OIDC_CERT_DIR"
+
+    # Generate two different key pairs — cert from one, private key from the other
+    ssh-keygen -t ed25519 -f "$OIDC_CERT_DIR/key_a" -N "" -q
+    ssh-keygen -t ed25519 -f "$OIDC_CERT_DIR/key_b" -N "" -q
+
+    # Create a self-signed cert for key_a (using ssh-keygen -s requires a CA;
+    # instead, just use key_a's public key as the "cert" — ssh-keygen -L will
+    # fail to parse it, triggering the empty-fingerprint path)
+    # For a proper test, generate a real cert:
+    ssh-keygen -s "$OIDC_CERT_DIR/key_a" -I test -n testuser -V +1h "$OIDC_CERT_DIR/key_a.pub"
+    cp "$OIDC_CERT_DIR/key_a-cert.pub" "$OIDC_CERT_DIR/id_oidc-cert.pub"
+    # Use key_b as the private key (mismatched)
+    cp "$OIDC_CERT_DIR/key_b" "$OIDC_CERT_DIR/id_oidc"
+
+    ret=0; oidc_check_cached_cert 2>/dev/null || ret=$?
+    [ "$ret" -eq 1 ]
+}
+
 # Test: validate_oidc_urls() rejects empty OIDC_CA_URL
 @test "validate_oidc_urls rejects empty OIDC_CA_URL" {
     _source_fn print_error log_error validate_oidc_urls
@@ -1150,7 +1175,7 @@ MOCK_TS
 
 # Test: load_config reads HOME_NETWORK from config file
 @test "load_config reads HOME_NETWORK from config file" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'HOME_NETWORK=10.10.0.0/16\n' > "$CONFIG_FILE"
 
@@ -1162,7 +1187,7 @@ MOCK_TS
 
 # Test: load_config reads HOME_GATEWAY_MAC from config file
 @test "load_config reads HOME_GATEWAY_MAC from config file" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff\n' > "$CONFIG_FILE"
 
@@ -1174,7 +1199,7 @@ MOCK_TS
 
 # Test: load_config reads LOG_LEVEL from config file
 @test "load_config reads LOG_LEVEL from config file" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'LOG_LEVEL=debug\n' > "$CONFIG_FILE"
 
@@ -1186,7 +1211,7 @@ MOCK_TS
 
 # Test: load_config skips comment lines
 @test "load_config skips comment lines" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf '# This is a comment\nHOME_NETWORK=172.16.0.0/12\n' > "$CONFIG_FILE"
 
@@ -1198,7 +1223,7 @@ MOCK_TS
 
 # Test: load_config strips double quotes from values
 @test "load_config strips double quotes from values" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'HOME_NETWORK="192.168.2.0/24"\n' > "$CONFIG_FILE"
 
@@ -1210,7 +1235,7 @@ MOCK_TS
 
 # Test: load_config strips single quotes from values
 @test "load_config strips single quotes from values" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf "HOME_NETWORK='192.168.3.0/24'\n" > "$CONFIG_FILE"
 
@@ -1222,7 +1247,7 @@ MOCK_TS
 
 # Test: load_config does nothing when config file is absent
 @test "load_config does nothing when config file is absent" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     # CONFIG_FILE is set in setup() but the file doesn't exist yet
 
     unset CONFIG_HOME_NETWORK
@@ -1234,7 +1259,7 @@ MOCK_TS
 
 # Test: load_config reads OIDC_ENABLED from config file
 @test "load_config reads OIDC_ENABLED from config file" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'OIDC_ENABLED=true\n' > "$CONFIG_FILE"
 
@@ -1246,7 +1271,7 @@ MOCK_TS
 
 # Test: load_config reads TAILSCALE_AS_HOME from config file
 @test "load_config reads TAILSCALE_AS_HOME from config file" {
-    _source_fn load_config
+    _source_fn trim_whitespace load_config
     mkdir -p "$CONFIG_DIR"
     printf 'TAILSCALE_AS_HOME=false\n' > "$CONFIG_FILE"
 
@@ -1257,12 +1282,80 @@ MOCK_TS
 }
 
 # ============================================================
+# SSH host listing Tests
+# ============================================================
+
+@test "list_ssh_hosts reads Include files and skips wildcard hosts" {
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh/conf.d"
+
+    cat > "$HOME/.ssh/config" <<EOF
+Host direct-host *.ignored
+    HostName direct.example.com
+Include ~/.ssh/conf.d/*.conf
+EOF
+
+    cat > "$HOME/.ssh/conf.d/extra.conf" <<EOF
+Host included-host
+    HostName included.example.com
+EOF
+
+    run list_ssh_hosts
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "direct-host" ]]
+    [[ "$output" =~ "included-host" ]]
+    [[ ! "$output" =~ "ignored" ]]
+}
+
+@test "list_ssh_hosts does not execute Include shell metacharacters" {
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh/conf.d"
+    local marker="$TEST_CONFIG_DIR/include-command-ran"
+
+    printf 'Include ~/.ssh/conf.d/*.conf$(touch${IFS}%s)\nHost safe-host\n    HostName safe.example.com\n' \
+        "$marker" > "$HOME/.ssh/config"
+
+    cat > "$HOME/.ssh/conf.d/safe.conf" <<EOF
+Host included-safe-host
+    HostName included-safe.example.com
+EOF
+
+    run list_ssh_hosts
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+    [[ "$output" =~ "safe-host" ]]
+}
+
+@test "smart-ssh --list-hosts prints expanded host aliases" {
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh/conf.d"
+
+    cat > "$HOME/.ssh/config" <<EOF
+Host base-host
+    HostName base.example.com
+Include ~/.ssh/conf.d/*.conf
+EOF
+
+    cat > "$HOME/.ssh/conf.d/dev.conf" <<EOF
+Host dev-host
+    HostName dev.example.com
+EOF
+
+    run "$SMART_SSH" --list-hosts
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "base-host" ]]
+    [[ "$output" =~ "dev-host" ]]
+}
+
+# ============================================================
 # check_ssh_config Tests
 # ============================================================
 
 # Test: check_ssh_config returns 0 for known host in SSH config
 @test "check_ssh_config returns 0 when SSH config exists for hostname" {
-    _source_fn check_ssh_config
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts check_ssh_config
     export HOME="$TEST_CONFIG_DIR"
     mkdir -p "$HOME/.ssh"
     printf 'Host test-known-host\n    HostName example.com\n    User testuser\n' \
@@ -1272,30 +1365,25 @@ MOCK_TS
     [ "$?" -eq 0 ]
 }
 
-# Test: check_ssh_config returns 1 when ssh -G fails (no config at all)
-@test "check_ssh_config returns 1 when ssh -G fails" {
-    _source_fn check_ssh_config
-
-    # Override ssh to always fail
-    ssh() { return 1; }
-    export -f ssh
+# Test: check_ssh_config returns 1 for host missing from SSH config
+@test "check_ssh_config returns 1 when hostname is missing from SSH config" {
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts check_ssh_config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host configured-host\n    HostName example.com\n' > "$HOME/.ssh/config"
 
     ret=0; check_ssh_config "nonexistent-host-xyz" 2>/dev/null || ret=$?
     [ "$ret" -eq 1 ]
-
-    unset -f ssh
 }
 
 # Test: check_ssh_config outputs warning message on failure
 @test "check_ssh_config outputs warning when host not found" {
-    _source_fn check_ssh_config
-
-    ssh() { return 1; }
-    export -f ssh
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts check_ssh_config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host configured-host\n    HostName example.com\n' > "$HOME/.ssh/config"
 
     run check_ssh_config "missing-host" 2>&1
     [ "$status" -eq 1 ]
     [[ "$output" =~ "Warning" ]] || [[ "$output" =~ "missing-host" ]]
-
-    unset -f ssh
 }

@@ -48,14 +48,22 @@ sudo install -m 755 /tmp/smart-ssh /usr/local/bin/smart-ssh
 smart-ssh --help
 ```
 
-### Option 2: Development Install
-
-> **Warning**: This installs from the latest HEAD and is not version-pinned. Use for development only.
+### Option 2: User-local Install (No sudo required)
 
 ```bash
-# Download and install to /usr/local/bin
-curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh | sudo tee /usr/local/bin/smart-ssh > /dev/null
-sudo chmod +x /usr/local/bin/smart-ssh
+# Create local bin directory if it doesn't exist
+mkdir -p ~/.local/bin
+
+# Download release binary and checksum
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh -o ~/.local/bin/smart-ssh
+curl -fsSL https://github.com/ngc-shj/smart-ssh/releases/download/v1.0.0/smart-ssh.sha256 -o /tmp/smart-ssh.sha256
+
+# Verify checksum before making the script executable
+(cd /tmp && sha256sum -c smart-ssh.sha256)
+chmod +x ~/.local/bin/smart-ssh
+
+# Add to PATH if not already (add to ~/.bashrc or ~/.zshrc)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
 
 # Verify installation
 smart-ssh --help
@@ -83,22 +91,17 @@ cp completions/_smart-ssh $(brew --prefix)/share/zsh/site-functions/_smart-ssh
 smart-ssh --help
 ```
 
-### Option 4: User-local Install (No sudo required)
+### Option 4: Development Install
+
+> **Warning**: Development installs should come from a reviewed checkout, not an unverified raw URL.
 
 ```bash
-# Create local bin directory if it doesn't exist
-mkdir -p ~/.local/bin
+git clone https://github.com/ngc-shj/smart-ssh.git
+cd smart-ssh
+git checkout v1.0.0   # or a reviewed branch/commit for development
 
-# Download and install
-curl -fsSL https://raw.githubusercontent.com/ngc-shj/smart-ssh/main/smart-ssh -o ~/.local/bin/smart-ssh
-chmod +x ~/.local/bin/smart-ssh
-
-# Add to PATH if not already (add to ~/.bashrc or ~/.zshrc)
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
-source ~/.bashrc  # or source ~/.zshrc
-
-# Verify installation
-smart-ssh --help
+# Run directly from the checkout, or install from local files you reviewed
+./smart-ssh --help
 ```
 
 ## Configuration
