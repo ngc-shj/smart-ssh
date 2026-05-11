@@ -1390,16 +1390,30 @@ ssh_with_oidc() {
     ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
 }
 
-# Check SSH configuration exists (single host entry)
+# Check that the hostname can be reached — either declared in ~/.ssh/config
+# (Host alias) or resolvable via DNS / IP literal.
 check_ssh_config() {
     local hostname="$1"
 
-    if ! list_ssh_hosts | grep -Fx -- "$hostname" >/dev/null 2>&1; then
-        echo "Warning: SSH configuration for '$hostname' not found"
-        return 1
+    if list_ssh_hosts | grep -Fx -- "$hostname" >/dev/null 2>&1; then
+        return 0
     fi
 
-    return 0
+    # Strip optional user@ prefix before resolving
+    local target="${hostname##*@}"
+
+    # IPv4 literal, or IPv6 literal (≥2 colons rules out host:port forms)
+    if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$target" == *:*:* ]]; then
+        return 0
+    fi
+
+    if resolve_hostname "$target" >/dev/null 2>&1; then
+        log_debug "Host '$hostname' not in SSH config; using DNS resolution"
+        return 0
+    fi
+
+    echo "Warning: SSH configuration for '$hostname' not found" >&2
+    return 1
 }
 
 # Connect from home (regular public key authentication)
