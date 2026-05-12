@@ -1367,10 +1367,14 @@ EOF
 
 # Test: check_ssh_config returns 1 for host missing from SSH config
 @test "check_ssh_config returns 1 when hostname is missing from SSH config" {
-    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts check_ssh_config
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts \
+        resolve_hostname check_ssh_config
     export HOME="$TEST_CONFIG_DIR"
     mkdir -p "$HOME/.ssh"
     printf 'Host configured-host\n    HostName example.com\n' > "$HOME/.ssh/config"
+
+    # Force DNS lookup to fail so the test is deterministic
+    resolve_hostname() { return 1; }
 
     ret=0; check_ssh_config "nonexistent-host-xyz" 2>/dev/null || ret=$?
     [ "$ret" -eq 1 ]
@@ -1378,12 +1382,42 @@ EOF
 
 # Test: check_ssh_config outputs warning message on failure
 @test "check_ssh_config outputs warning when host not found" {
-    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts check_ssh_config
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts \
+        resolve_hostname check_ssh_config
     export HOME="$TEST_CONFIG_DIR"
     mkdir -p "$HOME/.ssh"
     printf 'Host configured-host\n    HostName example.com\n' > "$HOME/.ssh/config"
 
+    resolve_hostname() { return 1; }
+
     run check_ssh_config "missing-host" 2>&1
     [ "$status" -eq 1 ]
     [[ "$output" =~ "Warning" ]] || [[ "$output" =~ "missing-host" ]]
+}
+
+# Test: check_ssh_config accepts IP literal even without SSH config entry
+@test "check_ssh_config returns 0 for IPv4 literal not in SSH config" {
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts \
+        resolve_hostname log_debug check_ssh_config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host configured-host\n    HostName example.com\n' > "$HOME/.ssh/config"
+
+    check_ssh_config "127.0.0.1" 2>/dev/null
+    [ "$?" -eq 0 ]
+}
+
+# Test: check_ssh_config falls back to DNS resolution for unconfigured hosts
+@test "check_ssh_config returns 0 when hostname resolves via DNS" {
+    _source_fn trim_whitespace _list_ssh_hosts_from_file list_ssh_hosts \
+        resolve_hostname log_debug check_ssh_config
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    : > "$HOME/.ssh/config"
+
+    # Stub the resolver so the test does not depend on the host's DNS state
+    resolve_hostname() { echo "192.0.2.1"; return 0; }
+
+    check_ssh_config "ad-hoc-host" 2>/dev/null
+    [ "$?" -eq 0 ]
 }
