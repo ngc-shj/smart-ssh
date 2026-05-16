@@ -1357,11 +1357,11 @@ ssh_with_oidc() {
         local ssh_g_proxy
         ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
 
+        # Proxy host uses its own SSH keys, not OIDC certificates
         echo "Host $proxy_jump" >> "$temp_config"
         echo "$ssh_g_proxy" | \
-            grep -E "^(hostname|port|user) " | \
+            grep -E "^(hostname|port|user|identityfile) " | \
             awk '{print "    " $1 " " $2}' >> "$temp_config"
-        _append_oidc_identity
         echo "" >> "$temp_config"
 
         echo "Host $hostname" >> "$temp_config"
