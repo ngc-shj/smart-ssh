@@ -578,6 +578,45 @@ _source_fn() {
     [ "$status" -ne 0 ]
 }
 
+# Test: OIDC + ProxyJump does not apply OIDC identity to proxy host
+@test "ssh_with_oidc ProxyJump uses original keys for proxy host" {
+    _source_fn print_error print_warning print_info print_success print_debug \
+        log_error log_warn log_info log_debug \
+        validate_ssh_hostname ssh_with_oidc
+    export COLOR_RED='' COLOR_YELLOW='' COLOR_BLUE='' COLOR_RESET=''
+    export CURRENT_LOG_LEVEL=3
+
+    # Set OIDC config
+    export OIDC_CERT_DIR="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$OIDC_CERT_DIR"
+
+    # Mock OIDC prerequisites to succeed
+    check_oidc_dependencies() { return 0; }
+    validate_oidc_urls() { return 0; }
+    validate_oidc_cert_lifetime() { return 0; }
+    ensure_oidc_cert_dir() { return 0; }
+    oidc_check_cached_cert() { return 0; }
+
+    # Mock ssh to return controlled -G output
+    ssh() {
+        if [ "$1" = "-G" ] && [ "$2" = "target" ]; then
+            printf "user deploy\nhostname 10.0.0.5\nport 22\nproxyjump bastion\n"
+        elif [ "$1" = "-G" ] && [ "$2" = "bastion" ]; then
+            printf "user admin\nhostname bastion.example.com\nport 22\nidentityfile /home/testuser/.ssh/id_ed25519\n"
+        fi
+    }
+
+    run ssh_with_oidc target true
+    [ "$status" -eq 0 ]
+
+    # Proxy host stanza must NOT contain OIDC CertificateFile
+    ! echo "$output" | grep -A5 "Host bastion" | grep -q "CertificateFile"
+    # Proxy host stanza should contain original identityfile
+    echo "$output" | grep -A5 "Host bastion" | grep -qi "identityfile"
+    # Target host stanza must contain OIDC CertificateFile
+    echo "$output" | grep -A10 "Host target" | grep -q "CertificateFile"
+}
+
 # ============================================================
 # Version Tests
 # ============================================================
