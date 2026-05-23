@@ -135,7 +135,7 @@ _list_ssh_hosts_from_file() {
 }
 
 list_ssh_hosts() {
-    local config_file="${1:-$HOME/.ssh/config}"
+    local config_file="$HOME/.ssh/config"
     _list_ssh_hosts_from_file "$config_file" | sort -u
 }
 
@@ -1357,10 +1357,23 @@ ssh_with_oidc() {
         local ssh_g_proxy
         ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
 
-        # Proxy host uses its own SSH keys, not OIDC certificates
+        # Proxy host: offer the OIDC certificate as the primary identity so
+        # a sshd configured with TrustedUserCAKeys can authenticate the user
+        # via the same OIDC cert as the target — avoiding a second factor
+        # on the proxy hop. Write the OIDC IdentityFile/CertificateFile
+        # BEFORE the proxy's configured identityfile so OpenSSH tries the
+        # cert first (ssh_config(5): IdentityFile directives are tried in
+        # the order listed). Keep the proxy's configured identityfile and
+        # the ssh-agent (no IdentitiesOnly / IdentityAgent none here) as
+        # fallbacks for setups where the proxy does not trust the OIDC CA.
         echo "Host $proxy_jump" >> "$temp_config"
         echo "$ssh_g_proxy" | \
-            grep -E "^(hostname|port|user|identityfile) " | \
+            grep -E "^(hostname|port|user) " | \
+            awk '{print "    " $1 " " $2}' >> "$temp_config"
+        echo "    IdentityFile $key_file" >> "$temp_config"
+        echo "    CertificateFile $cert_file" >> "$temp_config"
+        echo "$ssh_g_proxy" | \
+            grep -E "^identityfile " | \
             awk '{print "    " $1 " " $2}' >> "$temp_config"
         echo "" >> "$temp_config"
 
