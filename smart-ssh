@@ -135,7 +135,7 @@ _list_ssh_hosts_from_file() {
 }
 
 list_ssh_hosts() {
-    local config_file="${1:-$HOME/.ssh/config}"
+    local config_file="$HOME/.ssh/config"
     _list_ssh_hosts_from_file "$config_file" | sort -u
 }
 
