@@ -578,8 +578,16 @@ _source_fn() {
     [ "$status" -ne 0 ]
 }
 
-# Test: OIDC + ProxyJump does not apply OIDC identity to proxy host
-@test "ssh_with_oidc ProxyJump uses original keys for proxy host" {
+# Test: OIDC + ProxyJump offers OIDC cert to proxy host alongside original key
+# Background: PR #21 stopped applying IdentitiesOnly/IdentityAgent-none on the
+# proxy hop (so the proxy's own key + ssh-agent stay usable). This test locks
+# in the follow-up: the OIDC IdentityFile/CertificateFile are also offered to
+# the proxy host as the PRIMARY identity (written before the original
+# identityfile), so a proxy sshd configured with TrustedUserCAKeys can
+# authenticate the user with the same OIDC cert as the target — without
+# falling back to a second key. The proxy's configured identityfile and the
+# ssh-agent remain as fallbacks for proxies that do not trust the OIDC CA.
+@test "ssh_with_oidc ProxyJump offers OIDC cert as primary identity on proxy host" {
     _source_fn print_error print_warning print_info print_success print_debug \
         log_error log_warn log_info log_debug \
         validate_ssh_hostname ssh_with_oidc
@@ -609,12 +617,32 @@ _source_fn() {
     run ssh_with_oidc target true
     [ "$status" -eq 0 ]
 
-    # Proxy host stanza must NOT contain OIDC CertificateFile
-    ! echo "$output" | grep -A5 "Host bastion" | grep -q "CertificateFile"
-    # Proxy host stanza should contain original identityfile
-    echo "$output" | grep -A5 "Host bastion" | grep -qi "identityfile"
+    # Extract the proxy host stanza (Host bastion ... up to the next blank line)
+    # avoids the prior `grep -AN` window-size fragility that silently truncated
+    # assertions when the stanza grew.
+    proxy_stanza=$(echo "$output" | awk '/^[[:space:]]*Host bastion[[:space:]]*$/{p=1; next} p && /^[[:space:]]*$/{p=0} p')
+    target_stanza=$(echo "$output" | awk '/^[[:space:]]*Host target[[:space:]]*$/{p=1; next} p && /^[[:space:]]*$/{p=0} p')
+
+    # Proxy stanza MUST contain the OIDC IdentityFile and CertificateFile
+    echo "$proxy_stanza" | grep -q "CertificateFile $OIDC_CERT_DIR/id_oidc-cert.pub"
+    echo "$proxy_stanza" | grep -q "IdentityFile $OIDC_CERT_DIR/id_oidc"
+    # Proxy stanza MUST retain the original identityfile as a fallback
+    echo "$proxy_stanza" | grep -qi "identityfile /home/testuser/.ssh/id_ed25519"
+    # Proxy stanza MUST NOT pin to a single identity — ssh-agent + the proxy's
+    # own key must remain usable when the proxy does not trust the OIDC CA.
+    ! echo "$proxy_stanza" | grep -q "IdentitiesOnly yes"
+    ! echo "$proxy_stanza" | grep -q "IdentityAgent none"
+
+    # OIDC IdentityFile must appear BEFORE the original identityfile (OpenSSH
+    # tries IdentityFile directives in listed order; cert-first lets a
+    # TrustedUserCAKeys-configured proxy accept the OIDC cert without
+    # consuming MaxAuthTries on the fallback key).
+    oidc_line=$(echo "$proxy_stanza" | grep -n "IdentityFile $OIDC_CERT_DIR/id_oidc$" | head -1 | cut -d: -f1)
+    fallback_line=$(echo "$proxy_stanza" | grep -ni "identityfile /home/testuser/.ssh/id_ed25519" | head -1 | cut -d: -f1)
+    [ -n "$oidc_line" ] && [ -n "$fallback_line" ] && [ "$oidc_line" -lt "$fallback_line" ]
+
     # Target host stanza must contain OIDC CertificateFile
-    echo "$output" | grep -A10 "Host target" | grep -q "CertificateFile"
+    echo "$target_stanza" | grep -q "CertificateFile"
 }
 
 # ============================================================
