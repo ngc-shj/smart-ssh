@@ -125,8 +125,12 @@ Configuration file format (`~/.config/smart-ssh/config`):
 
 ```bash
 # Treat Tailscale hosts as home network (true/false)
-# Connections to Tailscale nodes (100.64.0.0/10, *.ts.net) use regular public key auth
+# Verified with the local Tailscale daemon only; requires jq and the tailscale CLI
 TAILSCALE_AS_HOME=true
+
+# Where to find the Tailscale CLI when it is not on PATH (macOS App Store build)
+# Must be owned by root to be trusted
+#TAILSCALE_CLI_BUNDLE_PATH=
 
 # Home gateway MAC addresses (comma-separated, preferred detection method)
 # Use 'smart-ssh --debug' to find your gateway MAC address
@@ -314,7 +318,7 @@ smart-ssh uses the following detection methods in priority order:
 
 | Priority | Method      | Description                                                                                     |
 |----------|-------------|-------------------------------------------------------------------------------------------------|
-| 1        | Tailscale   | `tailscale whois` CLI query; falls back to CGNAT range (100.64.0.0/10) and MagicDNS (*.ts.net)  |
+| 1        | Tailscale   | `tailscale whois` CLI query (no fallback — see below)                                           |
 | 2        | Gateway MAC | Router MAC address via ARP (no permissions needed)                                              |
 | 3        | IP Address  | CIDR range matching (fallback)                                                                  |
 
@@ -322,13 +326,69 @@ smart-ssh uses the following detection methods in priority order:
 
 When `TAILSCALE_AS_HOME=true` (default), connections to Tailscale nodes are automatically treated as home network.
 
-**Primary**: uses `tailscale whois --json` to query the local Tailscale daemon for authoritative peer information.
+Detection asks the local Tailscale daemon and nothing else. The SSH target's
+`HostName` is matched against the daemon's own peer list (`tailscale status
+--json`) to find its tailnet address, and that address is confirmed with
+`tailscale whois --json`, which takes an address rather than a name. The
+`HostName` may be a tailnet address, a MagicDNS FQDN with or without a trailing
+dot. A bare node label is not accepted: `HostName nas` for a LAN machine would
+otherwise match an unrelated tailnet peer that happens to be called `nas`.
 
-**Fallback** (when the CLI is unavailable): checks the SSH target's resolved hostname for:
+Name lookup deliberately does not use `tailscale ip <name>`: for a name the
+daemon does not recognise, that command falls back to a system DNS lookup and
+reports whichever peer owns the address it gets back — which would let the
+resolver on an untrusted network choose the address this decision is made
+about. Matching the peer list keeps DNS out of the path entirely.
 
-- IP addresses in the Tailscale CGNAT range (`100.64.0.0/10`)
-- MagicDNS hostnames (`*.ts.net`)
-- DNS-resolved IPs in the CGNAT range
+If the CLI cannot be found, the daemon is not running, or `jq` is unavailable,
+smart-ssh treats the connection as external and requires the security key.
+**There is no heuristic fallback**, by design.
+
+Earlier versions guessed from the destination when the daemon was unavailable —
+an address in the CGNAT range (`100.64.0.0/10`), a `*.ts.net` name, or a DNS
+answer landing in that range. None of those is evidence. `100.64.0.0/10` is
+shared CGNAT space that any DHCP server can hand out, `*.ts.net` is a label in
+your own config rather than a live path, and on an untrusted network the
+resolver belongs to whoever runs it. Each could be produced by the network the
+security key exists to defend against, and acting on one would use the on-disk
+key exactly where it should not be used.
+
+Once a node is confirmed, smart-ssh connects to **the address the daemon
+vouched for** (`-o HostName=<tailnet address> -o HostKeyAlias=<name>`) rather
+than letting ssh resolve the name again. The check proves a peer of that name
+exists on the tailnet, not that the name still resolves to it — and whenever
+Tailscale is not managing DNS (`--accept-dns=false`, MagicDNS off, or a
+platform where it cannot own `resolv.conf`) that second lookup would go to the
+untrusted network's resolver. `HostKeyAlias` keeps the `known_hosts` entry
+under the name you typed, so pinning causes no host-key prompts; a
+`HostKeyAlias` you configured yourself is left alone.
+
+The check evaluates the SSH options the connection will actually use, so
+`smart-ssh myhost -o HostName=elsewhere` is judged on `elsewhere`, not on
+`myhost`, and a host that exists only in a config named with `-F` is
+recognised.
+
+On external networks smart-ssh connects through a temporary config that pins
+the security key or OIDC certificate. Your config is read into that temporary
+config in full — `ProxyCommand`, `HostKeyAlias`, `UserKnownHostsFile`,
+forwardings and the rest — with only the identity directives replaced. Your
+`-F` is then dropped from the ssh command line — ssh honours the last
+`-F`, so leaving it there would replace the temporary config and discard the
+identity restrictions. Other options you pass are forwarded unchanged. The pin is placed ahead of your own options, since ssh takes the
+first value of an option and a pin added after them would be ignored.
+
+The CLI is looked up on `PATH` and then at
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, where the macOS App
+Store build keeps it without installing a symlink. That second location is only
+consulted when Tailscale is absent from `PATH`, and it is executed only if root
+owns it — on macOS `/Applications` is group-writable, so an unprivileged
+process could otherwise leave a binary there that vouches for any host. Set
+`TAILSCALE_CLI_BUNDLE_PATH` (environment or config file) if your installation
+differs.
+
+If the daemon genuinely is unavailable and you still want the network treated
+as home, use gateway MAC detection or `HOME_NETWORK` — both are described
+below and neither depends on the destination's name.
 
 ### Gateway MAC Detection (Recommended)
 
@@ -600,7 +660,7 @@ bats -f "validate IP" tests/test_smart_ssh.bats
 
 - SSH client with security key support (OpenSSH 8.2+)
 - Hardware security key (YubiKey, etc.) for away connections
-- Optional: `jq` and `curl` for OIDC Device Flow authentication
+- `jq` — required for Tailscale host detection (on by default); also required, with `curl`, for OIDC Device Flow authentication
 - Optional: bats-core for running tests
 
 ## Troubleshooting
