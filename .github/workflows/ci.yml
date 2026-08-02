@@ -12,6 +12,9 @@ permissions:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # A few tests still run the script end to end, which reaches the live
+    # resolver; a runner with a slow one would otherwise burn the 6h default
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -27,12 +30,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bats shellcheck
+          sudo apt-get install -y bats shellcheck jq
 
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install bats-core shellcheck
+          brew install bats-core shellcheck jq
 
       - name: Run ShellCheck
         run: shellcheck -e SC2155,SC2129,SC2181,SC2029 smart-ssh

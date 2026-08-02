@@ -16,6 +16,9 @@ DEFAULT_HOME_NETWORK="192.168.1.0/24"
 DEFAULT_HOME_GATEWAY_MAC=""
 DEFAULT_SECURITY_KEY_PATH="$HOME/.ssh/id_ed25519_sk"
 DEFAULT_TAILSCALE_AS_HOME="true"
+# The macOS App Store build of Tailscale ships its CLI inside the bundle and
+# installs no PATH symlink; look there before giving up on the daemon
+DEFAULT_TAILSCALE_CLI_BUNDLE_PATH="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 DEFAULT_LOG_LEVEL="info"
 DEFAULT_OIDC_ENABLED="false"
 DEFAULT_OIDC_ISSUER=""
@@ -68,6 +71,9 @@ load_config() {
                     ;;
                 TAILSCALE_AS_HOME)
                     CONFIG_TAILSCALE_AS_HOME="$value"
+                    ;;
+                TAILSCALE_CLI_BUNDLE_PATH)
+                    CONFIG_TAILSCALE_CLI_BUNDLE_PATH="$value"
                     ;;
                 LOG_LEVEL)
                     CONFIG_LOG_LEVEL="$value"
@@ -146,6 +152,8 @@ HOME_NETWORK="${HOME_NETWORK:-${CONFIG_HOME_NETWORK:-$DEFAULT_HOME_NETWORK}}"
 HOME_GATEWAY_MAC="${HOME_GATEWAY_MAC:-${CONFIG_HOME_GATEWAY_MAC:-$DEFAULT_HOME_GATEWAY_MAC}}"
 # Treat Tailscale hosts as home network (can be overridden by environment variable)
 TAILSCALE_AS_HOME="${TAILSCALE_AS_HOME:-${CONFIG_TAILSCALE_AS_HOME:-$DEFAULT_TAILSCALE_AS_HOME}}"
+# Where to look for the Tailscale CLI when it is not on PATH
+TAILSCALE_CLI_BUNDLE_PATH="${TAILSCALE_CLI_BUNDLE_PATH:-${CONFIG_TAILSCALE_CLI_BUNDLE_PATH:-$DEFAULT_TAILSCALE_CLI_BUNDLE_PATH}}"
 # Security key path (can be overridden by environment variable)
 SECURITY_KEY_PATH="${SECURITY_KEY_PATH:-${CONFIG_SECURITY_KEY_PATH:-$DEFAULT_SECURITY_KEY_PATH}}"
 # Expand ~ in SECURITY_KEY_PATH
@@ -315,10 +323,16 @@ init_config() {
 # Treat Tailscale hosts as home network (true/false)
 # When enabled, connections to Tailscale nodes are treated as home network
 # and use regular public key authentication.
-# Detection: uses 'tailscale whois' CLI if available, otherwise falls back
-# to heuristic detection (CGNAT range 100.64.0.0/10, MagicDNS *.ts.net)
+# Detection asks the local Tailscale daemon and nothing else; when it cannot
+# be reached the connection is treated as external (security key required).
+# Requires jq and the tailscale CLI.
 # Default: true
 TAILSCALE_AS_HOME=true
+
+# Where to find the Tailscale CLI when it is not on PATH (the macOS App Store
+# build keeps it inside the app bundle). Must be owned by root to be trusted.
+# Default: /Applications/Tailscale.app/Contents/MacOS/Tailscale
+#TAILSCALE_CLI_BUNDLE_PATH=
 
 # Home gateway MAC addresses (comma-separated, preferred detection method)
 # Use 'smart-ssh --debug' to find your gateway MAC address
@@ -625,11 +639,58 @@ is_home_network() {
     return 1
 }
 
+# Resolve a hostname through the OS resolver: getent (NSS) on Linux,
+# dscacheutil on macOS. Unlike host/dig these answer for mDNS (.local) names
+# and /etc/hosts entries, at the cost of trusting unauthenticated mDNS replies.
+resolve_hostname_via_os() {
+    local hostname="$1"
+    local candidates=""
+
+    if command -v getent >/dev/null 2>&1; then
+        candidates=$(getent hosts "$hostname" 2>/dev/null | awk '{print $1}')
+    fi
+
+    if [ -z "$candidates" ] && command -v dscacheutil >/dev/null 2>&1; then
+        candidates=$(dscacheutil -q host -a name "$hostname" 2>/dev/null \
+            | awk '/^ip_address: |^ipv6_address: / {print $2}')
+    fi
+
+    [ -n "$candidates" ] || return 1
+
+    # A multi-homed host lists 127.0.0.1 first and mDNS advertises fe80:: link-
+    # local addresses; neither says the host is reachable. Keep them only when
+    # the name has nothing else to offer. 169.254.0.0/16 is excluded for the
+    # same reason it is on the local-IP path (see get_current_ip).
+    local routable
+    routable=$(printf '%s\n' "$candidates" | grep -Ev '^(127\.|169\.254\.|::1$|fe80:)')
+    [ -n "$routable" ] && candidates="$routable"
+
+    # IPv4 first — callers match the result against IPv4 CIDR ranges
+    local address
+    address=$(printf '%s\n' "$candidates" | grep -E '^[0-9]+\.' | head -1)
+    [ -n "$address" ] || address=$(printf '%s\n' "$candidates" | head -1)
+
+    echo "$address"
+}
+
 # Resolve hostname to IP address using available DNS tools
 # Try each tool in sequence until one succeeds, since some tools
 # (e.g., dig) bypass the system resolver and may miss Tailscale MagicDNS
+#
+# The second argument picks how far the resolver may reach:
+#   dns    (default) unicast DNS only, and never the OS resolver — not even
+#          when no DNS tool is installed and the answer would be nothing.
+#   system also asks the OS resolver, which sees mDNS/.local and /etc/hosts.
+#          An mDNS reply needs nothing but presence on the link, so this mode
+#          is for reachability checks only.
+#
+# No caller passes `dns` today — check_ssh_config is the only caller and it
+# opts in to `system`. The tier stays because `system` must be asked for
+# explicitly: a future caller that lands here by copy-paste gets the safe mode
+# by omission, and a caller that selects credentials must never get the other.
 resolve_hostname() {
     local hostname="$1"
+    local source="${2:-dns}"
     local resolved_ip=""
 
     # host uses system resolver (works with Tailscale MagicDNS)
@@ -642,9 +703,8 @@ resolve_hostname() {
         resolved_ip=$(dig +short "$hostname" A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
     fi
 
-    # getent uses system resolver (NSS)
-    if [ -z "$resolved_ip" ] && command -v getent >/dev/null 2>&1; then
-        resolved_ip=$(getent hosts "$hostname" 2>/dev/null | awk '{print $1}' | head -1)
+    if [ -z "$resolved_ip" ] && [ "$source" = "system" ]; then
+        resolved_ip=$(resolve_hostname_via_os "$hostname")
     fi
 
     if [ -n "$resolved_ip" ]; then
@@ -654,74 +714,175 @@ resolve_hostname() {
     return 1
 }
 
-# Check if the SSH target host is a Tailscale node
-# Primary: uses 'tailscale whois' CLI for authoritative detection
-# Fallback: CGNAT range 100.64.0.0/10 and MagicDNS *.ts.net (degraded)
+# Locate the Tailscale CLI. It is not always on PATH: the macOS App Store
+# build ships it inside the bundle and installs no symlink, and that is exactly
+# the population that used to depend on the removed heuristic.
+# On success sets TAILSCALE_CLI. It reports through a variable rather than
+# stdout so that it can log: a function whose stdout is its return value has
+# its diagnostics swallowed by the caller's command substitution.
+TAILSCALE_CLI=""
+find_tailscale_cli() {
+    TAILSCALE_CLI=""
+    local cli
+    if cli=$(command -v tailscale 2>/dev/null); then
+        TAILSCALE_CLI="$cli"
+        return 0
+    fi
+
+    # -f as well as -x: a directory is executable too, and accepting one turns
+    # a mistyped path into a misleading "daemon is not running"
+    cli="$TAILSCALE_CLI_BUNDLE_PATH"
+    if [ -n "$cli" ] && [ -f "$cli" ] && [ -x "$cli" ]; then
+        # This path is consulted only when Tailscale is absent from PATH, so
+        # nothing legitimate should occupy it — and on macOS /Applications is
+        # group-writable, meaning any process running as the user could put a
+        # fake CLI there and vouch for any host. Run it only if root owns it.
+        local owner
+        owner=$(stat -f '%u' "$cli" 2>/dev/null || stat -c '%u' "$cli" 2>/dev/null)
+        if [ "$owner" = "0" ]; then
+            TAILSCALE_CLI="$cli"
+            return 0
+        fi
+        log_warn "Ignoring $cli: not owned by root, so it cannot be trusted to answer for the tailnet"
+    fi
+
+    return 1
+}
+
+# Find the tailnet address of an SSH target, using only what the daemon knows.
+#
+# 'tailscale whois' takes an address, never a name, so a name has to be mapped
+# to one first. That mapping is deliberately not 'tailscale ip <name>': for a
+# name the daemon does not recognise, that command falls back to a system DNS
+# lookup and reports whichever peer owns the address that comes back. On an
+# untrusted network the resolver belongs to the attacker, so it would let them
+# choose the address this decision is made about. Matching against the daemon's
+# own peer list keeps DNS out of this lookup.
+#
+# Accepts a tailnet address or a full MagicDNS name, with or without the
+# trailing dot and in any case — DNS names are case-insensitive. A bare node
+# label is deliberately NOT accepted: `HostName nas` for a LAN machine would
+# then match an unrelated tailnet peer that happens to be called nas, and a
+# bare label is also the form with the weakest binding to the tailnet.
+tailscale_peer_ip() {
+    local cli="$1"
+    local target="$2"
+
+    "$cli" status --json 2>/dev/null | jq -r --arg target "$target" '
+        def norm: (. // "") | rtrimstr(".") | ascii_downcase;
+        ($target | norm) as $t
+        | [.Self] + (.Peer // {} | to_entries | map(.value))
+        | map(select(
+            (((.TailscaleIPs // []) | map(norm) | index($t)) != null)
+            or ((.DNSName | norm) == $t)
+          ))
+        | .[0].TailscaleIPs[0] // empty
+    ' 2>/dev/null
+}
+
+# Check if the SSH target host is a Tailscale node.
+#
+# Only the local daemon answers this. It is the one party that knows the
+# tailnet and the one the network we may be defending against cannot reach.
+# There is deliberately no fallback: every property observable without it (the
+# destination being in 100.64.0.0/10, a *.ts.net name, a DNS answer, this
+# machine holding a CGNAT address) is supplied by, or forgeable by, whoever
+# runs the network. 100.64.0.0/10 in particular is shared CGNAT space that a
+# hostile DHCP server can hand out, so holding such an address is not evidence
+# of a tunnel. Guessing wrong here means using the on-disk key on a network
+# where the security key was required, so with no daemon the answer is no.
+#
+# On success sets TAILSCALE_PEER_IP to the address the daemon vouched for. The
+# caller must connect to THAT address: this function proves a peer of that name
+# exists on the tailnet, not that the name still resolves to it. ssh would
+# resolve the name again through the system resolver, which belongs to the
+# attacker whenever Tailscale is not managing DNS (--accept-dns=false, MagicDNS
+# off, or a platform where it cannot own resolv.conf).
+#
+# Takes the SSH options the connection will actually use, and evaluates them:
+# `smart-ssh myhost -o HostName=elsewhere` (or -F, or a jump host) makes ssh
+# talk to a different machine than the bare alias names, and verifying the
+# alias would vouch for a host nobody is connecting to. Also sets
+# TAILSCALE_HOST_KEY_ALIAS to the name known_hosts should be keyed on, or
+# empty when the config already sets HostKeyAlias and ours must not override.
+TAILSCALE_PEER_IP=""
+TAILSCALE_HOST_KEY_ALIAS=""
+TAILSCALE_RESOLVED_HOST=""
 is_tailscale_host() {
     local hostname="$1"
+    shift
+    local ssh_options=("$@")
+    TAILSCALE_PEER_IP=""
+    TAILSCALE_HOST_KEY_ALIAS=""
+    TAILSCALE_RESOLVED_HOST=""
 
-    # Get resolved HostName from SSH config
+    # Resolve the config as ssh will see it, options included
+    local ssh_config
+    ssh_config=$(ssh -G "${ssh_options[@]}" -- "$hostname" 2>/dev/null)
+
     local resolved_host
-    resolved_host=$(ssh -G "$hostname" 2>/dev/null | awk '/^hostname / {print $2}')
+    resolved_host=$(echo "$ssh_config" | awk '/^hostname / {print $2}')
 
     if [ -z "$resolved_host" ]; then
         return 1
     fi
 
+    # Only supply a HostKeyAlias if nothing else did; overriding a configured
+    # one would look up the wrong known_hosts entry
+    if ! echo "$ssh_config" | grep -q '^hostkeyalias '; then
+        TAILSCALE_HOST_KEY_ALIAS="$resolved_host"
+    fi
+
     log_debug "Tailscale check: resolved HostName=$resolved_host"
 
-    # Primary detection: use 'tailscale whois' if available
-    if command -v tailscale >/dev/null 2>&1; then
-        # Check if Tailscale daemon is running
-        if tailscale status >/dev/null 2>&1; then
-            local whois_output
-            if whois_output=$(tailscale whois --json "$resolved_host" 2>/dev/null) && [ -n "$whois_output" ]; then
-                # Validate JSON and check Node.ID exists and is non-zero
-                local node_id
-                if node_id=$(echo "$whois_output" | jq -r '.Node.ID // 0' 2>/dev/null); then
-                    if [ -n "$node_id" ] && [ "$node_id" != "0" ] && [ "$node_id" != "null" ]; then
-                        log_debug "Tailscale detected via whois: Node.ID=$node_id ($resolved_host)"
-                        return 0
-                    fi
-                else
-                    log_debug "Tailscale whois: jq parse failed for $resolved_host"
-                fi
-            fi
-            log_debug "Tailscale whois: $resolved_host is not a Tailscale node"
-            return 1
-        else
-            log_warn "Tailscale CLI found but daemon is not running; falling back to heuristic detection"
-        fi
-    else
-        log_debug "Tailscale CLI not found; using heuristic detection (CGNAT/MagicDNS)"
-    fi
-
-    # Fallback: heuristic detection (degraded)
-    # Check if HostName is a Tailscale MagicDNS name (*.ts.net)
-    if [[ "$resolved_host" == *.ts.net ]]; then
-        log_debug "Tailscale detected (heuristic): MagicDNS hostname ($resolved_host)"
-        return 0
-    fi
-
-    # Check if HostName is an IP in Tailscale CGNAT range (100.64.0.0/10)
-    if validate_ip "$resolved_host"; then
-        if ip_in_cidr "$resolved_host" "100.64.0.0/10"; then
-            log_debug "Tailscale detected (heuristic): CGNAT IP ($resolved_host)"
-            return 0
-        fi
+    if ! command -v jq >/dev/null 2>&1; then
+        log_warn "jq not found; cannot verify $resolved_host is a Tailscale node, treating as external"
         return 1
     fi
 
-    # HostName is a non-ts.net hostname; try DNS resolution
-    local resolved_ip
-    resolved_ip=$(resolve_hostname "$resolved_host")
-    if [ -n "$resolved_ip" ] && validate_ip "$resolved_ip"; then
-        if ip_in_cidr "$resolved_ip" "100.64.0.0/10"; then
-            log_debug "Tailscale detected (heuristic): DNS resolved to CGNAT IP ($resolved_host -> $resolved_ip)"
-            return 0
-        fi
+    if ! find_tailscale_cli; then
+        log_warn "Tailscale CLI not found; cannot verify $resolved_host is a Tailscale node, treating as external"
+        return 1
+    fi
+    local tailscale_cli="$TAILSCALE_CLI"
+
+    if ! "$tailscale_cli" status >/dev/null 2>&1; then
+        log_warn "Tailscale daemon is not running; cannot verify $resolved_host is a Tailscale node, treating as external"
+        return 1
     fi
 
+    local peer_ip
+    peer_ip=$(tailscale_peer_ip "$tailscale_cli" "$resolved_host")
+    if [ -z "$peer_ip" ]; then
+        log_warn "$resolved_host is not a node on this tailnet (matched against tailnet addresses and MagicDNS names); treating as external. If it is reached over Tailscale under a different name, set HostName to its MagicDNS name or tailnet address, or use HOME_GATEWAY_MAC/HOME_NETWORK."
+        return 1
+    fi
+
+    # The verdict comes from stdout, not $?: an answer that identifies nobody
+    # has to be refused the same way an error is, and the CLI's exit status for
+    # a rejected argument has varied across releases
+    local whois_output
+    whois_output=$("$tailscale_cli" whois --json "$peer_ip" 2>/dev/null)
+    if [ -z "$whois_output" ]; then
+        log_debug "Tailscale whois: no answer for $resolved_host ($peer_ip)"
+        return 1
+    fi
+
+    # Validate JSON and check Node.ID exists and is non-zero
+    local node_id
+    if ! node_id=$(echo "$whois_output" | jq -r '.Node.ID // 0' 2>/dev/null); then
+        log_debug "Tailscale whois: jq parse failed for $resolved_host ($peer_ip)"
+        return 1
+    fi
+
+    if [ -n "$node_id" ] && [ "$node_id" != "0" ] && [ "$node_id" != "null" ]; then
+        log_debug "Tailscale detected via whois: Node.ID=$node_id ($resolved_host -> $peer_ip)"
+        TAILSCALE_PEER_IP="$peer_ip"
+        TAILSCALE_RESOLVED_HOST="$resolved_host"
+        return 0
+    fi
+
+    log_debug "Tailscale whois: $resolved_host ($peer_ip) is not a Tailscale node"
     return 1
 }
 
@@ -1341,10 +1502,15 @@ ssh_with_oidc() {
         echo "    IdentityAgent none" >> "$temp_config"
     }
 
-    # Cache ssh -G output to avoid repeated invocations
+    # Read the config as ssh will apply it, the caller's options included: a
+    # host may be defined only in a config named with -F, and its HostName /
+    # User / Port have to reach the temporary config or the connection is made
+    # to the wrong place.
     local ssh_g_host
-    ssh_g_host=$(ssh -G "$hostname" 2>/dev/null)
+    ssh_g_host=$(ssh -G "${ssh_options[@]}" -- "$hostname" 2>/dev/null)
 
+    # Secondary lookups read the same config files but must not inherit
+    # per-host overrides aimed at the target
     local proxy_jump
     proxy_jump=$(echo "$ssh_g_host" | grep "^proxyjump " | awk '{print $2}')
 
@@ -1355,7 +1521,7 @@ ssh_with_oidc() {
         fi
         log_debug "ProxyJump detected for OIDC: $proxy_jump"
         local ssh_g_proxy
-        ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
+        ssh_g_proxy=$(ssh -G "${SSH_CONFIG_OPTIONS[@]}" -- "$proxy_jump" 2>/dev/null)
 
         # Proxy host: offer the OIDC certificate as the primary identity so
         # a sshd configured with TrustedUserCAKeys can authenticate the user
@@ -1367,9 +1533,9 @@ ssh_with_oidc() {
         # the ssh-agent (no IdentitiesOnly / IdentityAgent none here) as
         # fallbacks for setups where the proxy does not trust the OIDC CA.
         echo "Host $proxy_jump" >> "$temp_config"
-        echo "$ssh_g_proxy" | \
-            grep -E "^(hostname|port|user) " | \
-            awk '{print "    " $1 " " $2}' >> "$temp_config"
+        _write_effective_config "$ssh_g_proxy" \
+            identityfile identityagent identitiesonly certificatefile \
+            >> "$temp_config"
         echo "    IdentityFile $key_file" >> "$temp_config"
         echo "    CertificateFile $cert_file" >> "$temp_config"
         echo "$ssh_g_proxy" | \
@@ -1378,20 +1544,25 @@ ssh_with_oidc() {
         echo "" >> "$temp_config"
 
         echo "Host $hostname" >> "$temp_config"
-        echo "$ssh_g_host" | \
-            grep -E "^(hostname|port|user|proxyjump|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
-            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        _write_effective_config "$ssh_g_host" \
+            identityfile identityagent identitiesonly certificatefile \
+            >> "$temp_config"
         _append_oidc_identity
     else
         echo "Host $hostname" >> "$temp_config"
-        echo "$ssh_g_host" | \
-            grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
-            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        _write_effective_config "$ssh_g_host" \
+            identityfile identityagent identitiesonly certificatefile \
+            >> "$temp_config"
         _append_oidc_identity
     fi
 
+    # Built once so the dry run cannot describe a command different from the
+    # one that would run. The caller's own -F is deliberately absent: see
+    # _split_ssh_config_options.
+    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" "$hostname")
+
     if [ "$dry_run" = true ]; then
-        print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
+        print_info "[DRY RUN] Would execute: ${ssh_command[*]}"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1399,14 +1570,95 @@ ssh_with_oidc() {
         return 0
     fi
 
-    log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
-    ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
+    log_debug "Executing: ${ssh_command[*]}"
+    "${ssh_command[@]}"
 }
 
-# Check that the hostname can be reached — either declared in ~/.ssh/config
-# (Host alias) or resolvable via DNS / IP literal.
+# Copy one host's effective configuration into the temporary config, minus the
+# directives the caller is about to set itself.
+#
+# A denylist, not an allowlist. The allowlist this replaces had to grow every
+# time somebody used a directive nobody had enumerated — ProxyCommand,
+# HostKeyAlias, UserKnownHostsFile, RemoteForward, DynamicForward — and each
+# omission silently changed how the connection was made or how the host was
+# verified, with a host needing ProxyCommand failing outright. The settings
+# come from `ssh -G`, so they are what ssh would have used anyway; the only
+# ones that must not be copied are those this temporary config exists to
+# override.
+#
+# `host` is dropped because it is not a setting: indented or not, it opens a
+# new Host block and would swallow every line after it.
+#
+# Usage: _write_effective_config <ssh -G output> [extra key to drop ...]
+_write_effective_config() {
+    local ssh_g="$1"
+    shift
+
+    local drop="host"
+    local key
+    for key in "$@"; do
+        drop="$drop|$key"
+    done
+
+    echo "$ssh_g" \
+        | grep -Ev "^($drop) " \
+        | awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}'
+}
+
+# Split SSH options into the -F config-file selections and everything else,
+# into SSH_CONFIG_OPTIONS and SSH_OTHER_OPTIONS.
+#
+# The two halves are needed in different places. Reading the effective config
+# requires the caller's -F, since a host may be defined only there. Running the
+# connection must NOT carry it: ssh takes the LAST -F, so a user's -F placed
+# after the temporary config we build would replace it wholesale — discarding
+# the IdentitiesOnly/IdentityAgent restrictions that are the entire reason the
+# temporary config exists, and letting an ordinary on-disk key be offered on an
+# external network. Nothing is lost by dropping it, because the temporary
+# config is generated from `ssh -G` output that already merged it.
+SSH_CONFIG_OPTIONS=()
+SSH_OTHER_OPTIONS=()
+_split_ssh_config_options() {
+    SSH_CONFIG_OPTIONS=()
+    SSH_OTHER_OPTIONS=()
+    local expect_path=false
+    local opt
+    for opt in "$@"; do
+        if [ "$expect_path" = true ]; then
+            expect_path=false
+            SSH_CONFIG_OPTIONS+=("$opt")
+            continue
+        fi
+        case "$opt" in
+            -F)
+                SSH_CONFIG_OPTIONS+=("$opt")
+                expect_path=true
+                ;;
+            -F?*)
+                SSH_CONFIG_OPTIONS+=("$opt")
+                ;;
+            -[!-]*F)
+                # Bundled short options ending in F take the next argument,
+                # e.g. `ssh -vF config`
+                SSH_OTHER_OPTIONS+=("${opt%F}")
+                expect_path=true
+                SSH_CONFIG_OPTIONS+=("-F")
+                ;;
+            *)
+                SSH_OTHER_OPTIONS+=("$opt")
+                ;;
+        esac
+    done
+}
+
+# Check that the hostname can be reached — declared in ~/.ssh/config or in a
+# config the SSH options bring in (Host alias), or resolvable via DNS / IP.
+# Takes the SSH options the connection will use, for the same reason
+# is_tailscale_host does: only ssh knows the effective set of config files.
 check_ssh_config() {
     local hostname="$1"
+    shift
+    local ssh_options=("$@")
 
     if list_ssh_hosts | grep -Fx -- "$hostname" >/dev/null 2>&1; then
         return 0
@@ -1415,12 +1667,24 @@ check_ssh_config() {
     # Strip optional user@ prefix before resolving
     local target="${hostname##*@}"
 
+    # A Host block in a config named with -F is as real as one in
+    # ~/.ssh/config, and list_ssh_hosts cannot see it. ssh rewriting the
+    # HostName is the evidence that some block matched.
+    local effective
+    effective=$(ssh -G "${ssh_options[@]}" -- "$hostname" 2>/dev/null | awk '/^hostname / {print $2}')
+    if [ -n "$effective" ] && [ "$effective" != "$target" ]; then
+        log_debug "Host '$hostname' configured outside ~/.ssh/config (HostName $effective)"
+        return 0
+    fi
+
     # IPv4 literal, or IPv6 literal (≥2 colons rules out host:port forms)
     if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$target" == *:*:* ]]; then
         return 0
     fi
 
-    if resolve_hostname "$target" >/dev/null 2>&1; then
+    # Reachability only — nothing here selects credentials, so the OS resolver
+    # (mDNS/.local, /etc/hosts) is safe to consult
+    if resolve_hostname "$target" system >/dev/null 2>&1; then
         log_debug "Host '$hostname' not in SSH config; using DNS resolution"
         return 0
     fi
@@ -1489,9 +1753,12 @@ ssh_from_away() {
         echo "    IdentityAgent none" >> "$temp_config"
     }
 
-    # Cache ssh -G output to avoid repeated invocations
+    # Read the config as ssh will apply it, the caller's options included: a
+    # host may be defined only in a config named with -F, and its HostName /
+    # User / Port have to reach the temporary config or the connection is made
+    # to the wrong place. Cached to avoid repeated invocations.
     local ssh_g_host
-    ssh_g_host=$(ssh -G "$hostname" 2>/dev/null)
+    ssh_g_host=$(ssh -G "${ssh_options[@]}" -- "$hostname" 2>/dev/null)
 
     local proxy_jump
     proxy_jump=$(echo "$ssh_g_host" | grep "^proxyjump " | awk '{print $2}')
@@ -1504,24 +1771,23 @@ ssh_from_away() {
         fi
         log_debug "ProxyJump detected: $proxy_jump"
         local ssh_g_proxy
-        ssh_g_proxy=$(ssh -G "$proxy_jump" 2>/dev/null)
+        ssh_g_proxy=$(ssh -G "${SSH_CONFIG_OPTIONS[@]}" -- "$proxy_jump" 2>/dev/null)
 
         # Add proxy host configuration with security key
         echo "Host $proxy_jump" >> "$temp_config"
-        echo "$ssh_g_proxy" | \
-            grep -v "^identityfile " | \
-            grep -v "^identityagent " | \
-            grep -E "^(hostname|port|user) " | \
-            awk '{print "    " $1 " " $2}' >> "$temp_config"
+        _write_effective_config "$ssh_g_proxy" \
+            identityfile identityagent identitiesonly certificatefile \
+            >> "$temp_config"
         _append_sk_identity
         echo "" >> "$temp_config"
 
         # Add target host configuration (keep original IdentityFile for final destination)
         echo "Host $hostname" >> "$temp_config"
-        echo "$ssh_g_host" | \
-            grep -v "^identityagent " | \
-            grep -E "^(hostname|port|user|proxyjump|localforward|identityfile|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
-            awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+        # identityfile is deliberately kept here: the final destination keeps
+        # its own key, only the proxy hop is pinned to the security key
+        _write_effective_config "$ssh_g_host" \
+            identityagent identitiesonly certificatefile \
+            >> "$temp_config"
         echo "    IdentitiesOnly yes" >> "$temp_config"
     else
         # No ProxyJump - direct connection with security key
@@ -1538,7 +1804,7 @@ ssh_from_away() {
         local is_alias=false
         local ssh_g_target=""
         if [ -n "$target_hostname" ] && [ "$target_hostname" != "$hostname" ]; then
-            ssh_g_target=$(ssh -G "$target_hostname" 2>/dev/null)
+            ssh_g_target=$(ssh -G "${SSH_CONFIG_OPTIONS[@]}" -- "$target_hostname" 2>/dev/null)
             local alias_hostname
             alias_hostname=$(echo "$ssh_g_target" | grep "^hostname " | awk '{print $2}')
             # Sanitize alias_hostname before use
@@ -1551,11 +1817,9 @@ ssh_from_away() {
                 is_alias=true
                 # Add the alias host configuration
                 echo "Host $target_hostname" >> "$temp_config"
-                echo "$ssh_g_target" | \
-                    grep -v "^identityfile " | \
-                    grep -v "^identityagent " | \
-                    grep -E "^(hostname|port|user) " | \
-                    awk '{print "    " $1 " " $2}' >> "$temp_config"
+                _write_effective_config "$ssh_g_target" \
+                    identityfile identityagent identitiesonly certificatefile \
+                    >> "$temp_config"
                 _append_sk_identity
                 echo "" >> "$temp_config"
             fi
@@ -1566,28 +1830,35 @@ ssh_from_away() {
             # Use settings from the alias host, plus localforward from original
             # Use the resolved hostname (FQDN/IP), not the alias
             echo "    hostname $alias_hostname" >> "$temp_config"
-            echo "$ssh_g_target" | \
-                grep -v "^identityfile " | \
-                grep -v "^identityagent " | \
-                grep -v "^hostname " | \
-                grep -E "^(port|user) " | \
-                awk '{print "    " $1 " " $2}' >> "$temp_config"
-            # Add localforward and tunnel options from original config
-            echo "$ssh_g_host" | \
-                grep -E "^(localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
-                awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+            # Only the alias's connection identity is taken from it, and it
+            # goes first because ssh keeps the FIRST value of a setting — the
+            # requested name's defaults (port 22, the local user) would
+            # otherwise win over the alias's own. Everything else comes from
+            # the name the user actually asked for: copying the alias wholesale
+            # would put ITS defaults ahead of that name's explicit settings, so
+            # a StrictHostKeyChecking or ProxyCommand set on the requested host
+            # would be silently replaced by the alias's default.
+            echo "$ssh_g_target" \
+                | grep -E "^(user|port) " \
+                | awk '{print "    " $1 " " $2}' >> "$temp_config"
+            _write_effective_config "$ssh_g_host" \
+                hostname identityfile identityagent identitiesonly certificatefile \
+                >> "$temp_config"
         else
-            echo "$ssh_g_host" | \
-                grep -v "^identityfile " | \
-                grep -v "^identityagent " | \
-                grep -E "^(hostname|port|user|localforward|sessiontype|forkafterauthentication|requesttty|exitonforwardfailure) " | \
-                awk '{printf "    %s", $1; for(i=2;i<=NF;i++) printf " %s", $i; print ""}' >> "$temp_config"
+            _write_effective_config "$ssh_g_host" \
+                identityfile identityagent identitiesonly certificatefile \
+                >> "$temp_config"
         fi
         _append_sk_identity
     fi
 
+    # Built once so the dry run cannot describe a command different from the
+    # one that would run. The caller's own -F is deliberately absent: see
+    # _split_ssh_config_options.
+    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" "$hostname")
+
     if [ "$dry_run" = true ]; then
-        print_info "[DRY RUN] Would execute: ssh -F $temp_config ${ssh_options[*]} $hostname"
+        print_info "[DRY RUN] Would execute: ${ssh_command[*]}"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1595,8 +1866,8 @@ ssh_from_away() {
         return 0
     fi
 
-    log_debug "Executing: ssh -F $temp_config ${ssh_options[*]} $hostname"
-    ssh -F "$temp_config" "${ssh_options[@]}" "$hostname"
+    log_debug "Executing: ${ssh_command[*]}"
+    "${ssh_command[@]}"
 }
 
 # Main function
@@ -1669,8 +1940,11 @@ main() {
         exit 1
     fi
 
+    # Separate the caller's -F from the rest once, for every path below
+    _split_ssh_config_options "${ssh_options[@]}"
+
     # Check SSH configuration exists
-    if ! check_ssh_config "$hostname"; then
+    if ! check_ssh_config "$hostname" "${ssh_options[@]}"; then
         echo ""
         echo "Example SSH configuration:"
         echo "# ~/.ssh/config"
@@ -1712,12 +1986,29 @@ main() {
 
     # Try Tailscale destination detection first (if enabled)
     if [ "$TAILSCALE_AS_HOME" = "true" ]; then
-        if is_tailscale_host "$hostname"; then
+        if is_tailscale_host "$hostname" "${ssh_options[@]}"; then
             is_home=true
             detection_method="Tailscale"
-            local ts_host
-            ts_host=$(ssh -G "$hostname" 2>/dev/null | awk '/^hostname / {print $2}')
-            detected_value="$ts_host"
+            detected_value="$TAILSCALE_RESOLVED_HOST"
+
+            # Connect to the address the daemon vouched for. Letting ssh resolve
+            # the name again would hand the choice back to the system resolver,
+            # which is the attacker's whenever Tailscale is not managing DNS —
+            # the verdict would then be about one host and the on-disk key would
+            # be presented to another.
+            #
+            # PREPENDED, not appended: ssh takes the first value of an option,
+            # so anything added after the caller's own arguments loses to a
+            # `-o HostName=...` among them and the pin would be decorative.
+            local pin=(-o "HostName=$TAILSCALE_PEER_IP")
+            if [ -n "$TAILSCALE_HOST_KEY_ALIAS" ]; then
+                # Keeps known_hosts keyed on the name, so pinning the address
+                # costs no host-key prompts. Skipped when the config sets its
+                # own HostKeyAlias, which must stay authoritative.
+                pin+=(-o "HostKeyAlias=$TAILSCALE_HOST_KEY_ALIAS")
+            fi
+            ssh_options=("${pin[@]}" "${ssh_options[@]}")
+            log_debug "Pinning connection to verified tailnet address $TAILSCALE_PEER_IP"
         fi
     fi
 
