@@ -301,11 +301,38 @@ through `echo -e`. Two consequences, both reproduced:
   command different from the one that would run" was an R49 overstatement.
 - `myhost 'x\033[31mRED'` emitted a real ESC byte into the terminal.
 
-**Fix**: a `render_argv` helper using `printf '%q'`, applied at all three render
-sites. Arguments without shell-special bytes render unchanged; the rest are
-quoted back into inert, copy-pasteable text.
+**Fix (first attempt, incomplete)**: a `render_argv` helper using `printf '%q'`,
+applied at all three render sites.
 
-### D1 (Major, fixed) — docs and completions still taught the old grammar
+**S4 (Major, fixed) — %q alone was not enough.** A follow-up external review
+caught that the print helpers still used `echo -e`, which expands backslash
+sequences in the message as well as the colour. `%q` renders a RAW control byte
+as its backslash spelling, so `echo -e` turned it straight back into the byte:
+
+```
+$ smart-ssh --dry-run --security-key myhost $'x\nFORGED'
+... -- myhost $'x
+FORGED'                       # a real newline — a forged log line
+```
+
+BEL, CR and ESC behaved the same way. The helpers now use
+`printf '%b%s%b'` — the colour expands, the message does not.
+
+The test written for S3 did not catch this because it passed the two-character
+text `'\033[31mRED'`, which `%q` neutralises on its own; the raw-byte case is
+the half that was broken. It now passes real newline, BEL, CR and ESC bytes and
+asserts none survives into the rendered line. This is the round's clearest
+instance of a fixture that tested the easy direction of its own property.
+
+### D1 (Major, fixed) — docs and completions still taught the old grammar, and
+the explanation was wrong
+
+`usage()` and both READMEs said the hostname ends option parsing "as with ssh".
+It does not — ssh resumes parsing after the destination, which is the reason the
+exec sites pass `--` at all. Corrected to say smart-ssh treats the hostname as
+the boundary and inserts `--` for ssh. The same false claim in Round 1's
+reasoning is what produced S1, so it was worth removing from the docs too.
+
 
 - `usage()` and both READMEs documented `-- hostname -v` as the way to pass ssh
   options — the one shape the new grammar excludes. Corrected to `-- -v hostname`,
@@ -388,6 +415,7 @@ to the arm reddens exactly those two.
   - reverting `render_argv` to `${array[*]}` → the two display tests red
   - restoring `""` to the `--help|-h` dispatch arm → the two empty-argument
     tests red
+  - reverting `print_info`/`print_debug` to `echo -e` → the control-byte test red
 - `shellcheck -e SC2155,SC2129,SC2181,SC2029 smart-ssh` — clean.
 - `git diff --check` — clean.
 - `ssh -G` used as the authority for the credential-pinning assertions rather
