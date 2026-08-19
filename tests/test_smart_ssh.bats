@@ -2966,3 +2966,39 @@ _setup_remote_command_host() {
     [ "$status" -eq 0 ]
     _assert_output_has "Usage:"
 }
+
+# Test: the debug log outlives the session and goes wherever the operator
+# redirects it, while a remote command routinely carries a token in an argument.
+# The dry run still shows the command in full — that is what the flag is for.
+@test "debug log reports the remote command by count, not by content" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" LOG_LEVEL=debug \
+        "$SMART_SSH" --security-key myhost mysql -pSENTINEL-SECRET
+    _refute_output_has "SENTINEL-SECRET"
+    _assert_output_has "<remote command: 2 arguments>"
+}
+
+# Test: the paired case — the dry run must NOT redact, or the flag stops being a
+# way to check what would run.
+@test "dry run shows the remote command in full" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost mysql -pSENTINEL-SECRET
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost mysql -pSENTINEL-SECRET"
+}
+
+# Test: with no remote command there is nothing to redact, and the debug line
+# must stay a plain command rather than gaining an empty annotation.
+@test "debug log adds no redaction note when there is no remote command" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" LOG_LEVEL=debug \
+        "$SMART_SSH" --security-key myhost
+    _refute_output_has "remote command:"
+}

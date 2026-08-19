@@ -249,6 +249,36 @@ render_argv() {
     printf '%q ' "$@" | sed 's/ $//'
 }
 
+# Same, but with the remote command reduced to a word count. The debug log is
+# written to wherever the operator has redirected it and outlives the session,
+# while a remote command routinely carries a token or a password in an argument.
+# The dry run still prints it in full — showing exactly what would run is the
+# point of that flag — but nothing needs it in a log.
+render_argv_redacted() {
+    # Every exec site builds `... -- <hostname> [command...]`, so the hostname is
+    # the argument right after `--` and the command is everything past it.
+    local shown=() after_sep=false host_seen=false count=0 a
+    for a in "$@"; do
+        if [ "$host_seen" = true ]; then
+            count=$((count + 1))
+        elif [ "$after_sep" = true ]; then
+            shown+=("$a")          # the hostname
+            host_seen=true
+        else
+            shown+=("$a")
+            [ "$a" = "--" ] && after_sep=true
+        fi
+    done
+
+    if [ "$count" -eq 0 ]; then
+        render_argv "${shown[@]}"
+    elif [ "$count" -eq 1 ]; then
+        printf '%s <remote command: 1 argument>' "$(render_argv "${shown[@]}")"
+    else
+        printf '%s <remote command: %d arguments>' "$(render_argv "${shown[@]}")" "$count"
+    fi
+}
+
 # Logging functions with log level support
 log_error() {
     if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_ERROR" ]; then
@@ -1596,7 +1626,7 @@ ssh_with_oidc() {
         return 0
     fi
 
-    log_debug "Executing: $(render_argv "${ssh_command[@]}")"
+    log_debug "Executing: $(render_argv_redacted "${ssh_command[@]}")"
     "${ssh_command[@]}"
 }
 
@@ -1773,7 +1803,7 @@ ssh_from_home() {
 
     # See the comment at the away-path exec site: `--` is what stops ssh reading
     # a post-hostname argument as an option.
-    log_debug "Executing: $(render_argv ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")"
+    log_debug "Executing: $(render_argv_redacted ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")"
     ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}"
 }
 
@@ -1938,7 +1968,7 @@ ssh_from_away() {
         return 0
     fi
 
-    log_debug "Executing: $(render_argv "${ssh_command[@]}")"
+    log_debug "Executing: $(render_argv_redacted "${ssh_command[@]}")"
     "${ssh_command[@]}"
 }
 
