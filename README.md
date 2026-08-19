@@ -278,8 +278,9 @@ smart-ssh -L 8080:localhost:80 production
 # Multiple SSH options
 smart-ssh -v -p 2222 -L 8080:localhost:80 production
 
-# Run a command on the remote host. As with ssh, the hostname ends option
-# parsing, so everything after it is sent to the remote.
+# Run a command on the remote host. smart-ssh treats the hostname as the
+# boundary: everything after it is the command, and it passes `--` to ssh so
+# ssh cannot read those words as options of its own.
 smart-ssh production uptime
 smart-ssh production df -h
 

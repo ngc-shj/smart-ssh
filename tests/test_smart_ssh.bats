@@ -2923,13 +2923,25 @@ _setup_remote_command_host() {
 @test "dry run does not emit terminal escapes from a remote-command argument" {
     _setup_remote_command_host
 
-    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
-        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
-        "$SMART_SSH" --dry-run --security-key myhost 'x\033[31mRED'
-    [ "$status" -eq 0 ]
-    # The escape stays literal text, and no ESC (0x1b) byte reaches the output
-    _assert_exec_line "ssh -F CONFIG -- myhost x\\033\\[31mRED"
-    [ "$(printf '%s' "$output" | tr -d '\033' | wc -c)" -eq "$(printf '%s' "$output" | wc -c)" ]
+    # REAL control bytes, not the two-character spellings. A backslash-escape
+    # written as text is neutralised by %q alone; a raw byte is only neutralised
+    # if the print helper also refrains from re-expanding %q's output, which is
+    # the half a text-only fixture cannot see.
+    local arg
+    for arg in $'x\nFORGED' $'x\aBELL' $'x\rOVERWRITE' $'x\033[31mRED'; do
+        run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+            SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+            "$SMART_SSH" --dry-run --security-key myhost "$arg"
+        [ "$status" -eq 0 ] || { echo "failed for $(printf '%q' "$arg")"; return 1; }
+        # No newline, BEL, CR or ESC survives into the rendered command line
+        local line stripped
+        line=$(printf '%s' "$output" | grep 'Would execute')
+        stripped=$(printf '%s' "$line" | tr -d '\n\a\r\033')
+        [ "${#line}" -eq "${#stripped}" ] || {
+            echo "control byte reached output for $(printf '%q' "$arg"): $(printf '%q' "$line")"
+            return 1
+        }
+    done
 }
 
 # Test: an empty FIRST argument must not be answered with usage and a success

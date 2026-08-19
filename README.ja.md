@@ -279,8 +279,9 @@ smart-ssh -L 8080:localhost:80 production
 # 複数のSSHオプション
 smart-ssh -v -p 2222 -L 8080:localhost:80 production
 
-# リモートホストでコマンドを実行する。sshと同じくホスト名でオプション解釈が
-# 終わるため、それ以降はすべてリモートに渡される
+# リモートホストでコマンドを実行する。smart-sshはホスト名を境界として扱い、
+# それ以降をコマンドとする。ssh呼び出し時に`--`を挿入するため、sshがこれらを
+# 自身のオプションとして解釈することはない
 smart-ssh production uptime
 smart-ssh production df -h
 

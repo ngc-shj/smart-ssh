@@ -214,32 +214,37 @@ CURRENT_LOG_LEVEL=$(get_log_level_number)
 # Ensure CURRENT_LOG_LEVEL is set (default to INFO if empty)
 CURRENT_LOG_LEVEL=${CURRENT_LOG_LEVEL:-$LOG_LEVEL_INFO}
 
-# Print functions for colored output
+# Print functions for colored output.
+#
+# The colour is %b so its escape sequences expand; the message is %s so its own
+# do not. `echo -e` would expand both, which turns a backslash sequence carried
+# in a message — a remote-command argument, a hostname from a config — into real
+# control bytes, letting it forge log lines or drive the terminal.
 print_error() {
-    echo -e "${COLOR_RED}$*${COLOR_RESET}" >&2
+    printf '%b%s%b\n' "$COLOR_RED" "$*" "$COLOR_RESET" >&2
 }
 
 print_success() {
-    echo -e "${COLOR_GREEN}$*${COLOR_RESET}"
+    printf '%b%s%b\n' "$COLOR_GREEN" "$*" "$COLOR_RESET"
 }
 
 print_warning() {
-    echo -e "${COLOR_YELLOW}$*${COLOR_RESET}"
+    printf '%b%s%b\n' "$COLOR_YELLOW" "$*" "$COLOR_RESET"
 }
 
 print_info() {
-    echo -e "${COLOR_CYAN}$*${COLOR_RESET}"
+    printf '%b%s%b\n' "$COLOR_CYAN" "$*" "$COLOR_RESET"
 }
 
 print_debug() {
-    echo -e "${COLOR_BLUE}$*${COLOR_RESET}"
+    printf '%b%s%b\n' "$COLOR_BLUE" "$*" "$COLOR_RESET"
 }
 
 # Render an argv for display. Two reasons this cannot be "${array[*]}":
 # quoting is lost, so a single argument containing spaces prints as several and
-# the shown command stops matching the one that runs; and print_* use `echo -e`,
-# so a remote-command word containing \033 would emit real terminal escapes.
-# %q quotes both back into something inert and copy-pasteable.
+# the shown command stops matching the one that runs; and a control byte in an
+# argument would reach the terminal raw. %q turns both into inert,
+# copy-pasteable text — the print_* helpers then emit it without re-expanding it.
 render_argv() {
     printf '%q ' "$@" | sed 's/ $//'
 }
@@ -303,8 +308,9 @@ usage() {
     echo ""
     echo "SSH Options:"
     echo "  Any SSH options (like -v, -p, -L, etc.) are passed through to ssh."
-    echo "  Place them BEFORE the hostname. As with ssh itself, the hostname ends"
-    echo "  option parsing: everything after it is the command to run remotely."
+    echo "  Place them BEFORE the hostname. smart-ssh treats the hostname as the"
+    echo "  boundary: everything after it is the command to run remotely, and ssh"
+    echo "  is passed -- so it cannot read those words as options of its own."
     echo ""
     echo "Configuration:"
     echo "  Config file: $CONFIG_FILE"
@@ -1948,12 +1954,13 @@ main() {
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
-        # The hostname ends option parsing, exactly as it does for ssh itself:
-        # everything after the destination is the remote command. This runs
-        # before the case below because smart-ssh's own --help/-d would
-        # otherwise capture `smart-ssh host --help`, which the user means to run
-        # on the remote, and -*) would hoist a dash-leading command ahead of the
-        # destination.
+        # The hostname is the boundary: everything after the destination is
+        # the remote command. This runs before the case below because
+        # smart-ssh's own --help/-d would otherwise capture
+        # `smart-ssh host --help`, which the user means to run on the remote,
+        # and -*) would hoist a dash-leading command ahead of the destination.
+        # ssh does NOT stop at the destination by itself, which is why the exec
+        # sites pass `--`; this guard only decides what smart-ssh collects.
         if [ "$hostname_set" = true ]; then
             SSH_REMOTE_COMMAND=("$@")
             break
