@@ -408,7 +408,7 @@ to the arm reddens exactly those two.
 
 ## Verification
 
-- `bats tests/test_smart_ssh.bats` — 158/158 pass, clean `/tmp`, no fixture leak.
+- `bats tests/test_smart_ssh.bats` — 161/161 pass, clean `/tmp`, no fixture leak.
 - Mutation-proved, each reddening only its own guards:
   - removing `--` from the exec sites → 15 tests red
   - reverting the `--` branch predicate order → tests 145, 146, 147 red
@@ -416,11 +416,24 @@ to the arm reddens exactly those two.
   - restoring `""` to the `--help|-h` dispatch arm → the two empty-argument
     tests red
   - reverting `print_info`/`print_debug` to `echo -e` → the control-byte test red
+  - swapping `render_argv_redacted` back to `render_argv` → the debug-log test red
 - `shellcheck -e SC2155,SC2129,SC2181,SC2029 smart-ssh` — clean.
 - `git diff --check` — clean.
 - `ssh -G` used as the authority for the credential-pinning assertions rather
   than argv text, because an argv-substring assertion passed throughout the S1
   regression.
+
+### S5 (Minor, fixed) — the remote command was written to the debug log verbatim
+
+Raised by the final external review. A remote command routinely carries a token
+or a password in an argument, and the debug log goes wherever the operator
+redirected it and outlives the session. The debug lines now report the command
+by argument count.
+
+The dry run deliberately still prints it in full — showing exactly what would
+run is the purpose of that flag, and it goes to the terminal on request rather
+than into a log. Both directions are pinned by tests, so redacting the dry run
+would fail just as failing to redact the log does.
 
 ## Process note
 
