@@ -2932,3 +2932,25 @@ _setup_remote_command_host() {
     [ "$(printf '%s' "$output" | tr -d '\033' | wc -c)" -eq "$(printf '%s' "$output" | wc -c)" ]
 }
 
+# Test: an empty FIRST argument must not be answered with usage and a success
+# exit. The top-level dispatch used to match "" alongside --help, so the
+# hostname check never ran and a wrapper with an unset variable exited 0.
+@test "smart-ssh rejects an empty first argument instead of printing usage" {
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host myhost\n    HostName example.com\n' > "$HOME/.ssh/config"
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
+        "$SMART_SSH" "" myhost uptime
+    [ "$status" -ne 0 ]
+    _assert_output_has "Please specify a hostname"
+    _refute_output_has "Would execute:"
+}
+
+# Test: the paired allow case — no arguments at all is still a usage request and
+# still succeeds, so the fix above cannot be satisfied by rejecting everything.
+@test "smart-ssh with no arguments prints usage and succeeds" {
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 "$SMART_SSH"
+    [ "$status" -eq 0 ]
+    _assert_output_has "Usage:"
+}

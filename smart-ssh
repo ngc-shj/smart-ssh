@@ -2296,7 +2296,15 @@ debug_info() {
     echo "========================="
 }
 
-# Handle options and arguments
+# Handle options and arguments.
+# No arguments at all is a usage request; an empty FIRST argument is not — that
+# is a caller bug (an unset variable), and it must reach main's hostname check
+# rather than being answered with usage and a success exit.
+if [ $# -eq 0 ]; then
+    usage
+    exit 0
+fi
+
 case "$1" in
     --list-hosts)
         list_ssh_hosts
@@ -2304,7 +2312,7 @@ case "$1" in
     --debug|-d)
         debug_info
         ;;
-    --help|-h|"")
+    --help|-h)
         usage
         ;;
     --version)
