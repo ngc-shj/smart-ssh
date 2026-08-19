@@ -79,15 +79,17 @@ _smart_ssh_completion() {
             ;;
     esac
 
-    # If current word starts with -, complete with smart-ssh or SSH options
+    # Past the hostname everything is the remote command, so complete commands
+    # rather than options — ssh stops parsing options at the destination, and so
+    # does smart-ssh.
+    if [[ $hostname_idx -ne -1 ]] && [[ $hostname_idx -lt $COMP_CWORD ]]; then
+        COMPREPLY=( $(compgen -c -- ${cur}) )
+        return 0
+    fi
+
+    # If current word starts with -, complete with smart-ssh options
     if [[ ${cur} == -* ]]; then
-        # If hostname already provided, suggest SSH options
-        if [[ $hostname_idx -ne -1 ]] && [[ $hostname_idx -lt $COMP_CWORD ]]; then
-            COMPREPLY=( $(compgen -W "${ssh_opts}" -- ${cur}) )
-        else
-            # Otherwise suggest smart-ssh options
-            COMPREPLY=( $(compgen -W "${smart_ssh_opts}" -- ${cur}) )
-        fi
+        COMPREPLY=( $(compgen -W "${smart_ssh_opts}" -- ${cur}) )
         return 0
     fi
 

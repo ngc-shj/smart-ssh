@@ -267,19 +267,25 @@ smart-ssh --debug
 smart-ssh production
 
 # Pass SSH options (verbose mode)
-smart-ssh production -v
+smart-ssh -v production
 
 # Use custom SSH port
-smart-ssh production -p 2222
+smart-ssh -p 2222 production
 
 # Port forwarding with SSH options
-smart-ssh production -L 8080:localhost:80
+smart-ssh -L 8080:localhost:80 production
 
 # Multiple SSH options
-smart-ssh production -v -p 2222 -L 8080:localhost:80
+smart-ssh -v -p 2222 -L 8080:localhost:80 production
+
+# Run a command on the remote host. smart-ssh treats the hostname as the
+# boundary: everything after it is the command, and it passes `--` to ssh so
+# ssh cannot read those words as options of its own.
+smart-ssh production uptime
+smart-ssh production df -h
 
 # Use -- to clearly separate smart-ssh and SSH options
-smart-ssh --dry-run -- production -v -p 2222
+smart-ssh --dry-run -- -v production
 
 # Force security key authentication regardless of network
 smart-ssh --security-key bastion
@@ -364,7 +370,7 @@ under the name you typed, so pinning causes no host-key prompts; a
 `HostKeyAlias` you configured yourself is left alone.
 
 The check evaluates the SSH options the connection will actually use, so
-`smart-ssh myhost -o HostName=elsewhere` is judged on `elsewhere`, not on
+`smart-ssh -o HostName=elsewhere myhost` is judged on `elsewhere`, not on
 `myhost`, and a host that exists only in a config named with `-F` is
 recognised.
 

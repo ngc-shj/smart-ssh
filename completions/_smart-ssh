@@ -83,12 +83,11 @@ _smart-ssh() {
         compadd -a hosts
         return 0
     elif [[ $hostname_seen -eq 1 ]]; then
-        # After hostname, allow both smart-ssh and SSH options
-        _arguments -s -S \
-            $options \
-            $ssh_options \
-            '1:hostname:compadd -a hosts' \
-            && return 0
+        # After the hostname everything is the remote command, so complete
+        # commands rather than options — ssh stops parsing options at the
+        # destination, and so does smart-ssh.
+        _command_names -e
+        return 0
     else
         # Before hostname, only smart-ssh options
         _arguments -s -S \

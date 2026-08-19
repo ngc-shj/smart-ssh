@@ -268,19 +268,25 @@ smart-ssh --debug
 smart-ssh production
 
 # SSHオプションを渡す（詳細モード）
-smart-ssh production -v
+smart-ssh -v production
 
 # カスタムSSHポートを使用
-smart-ssh production -p 2222
+smart-ssh -p 2222 production
 
 # SSHオプションでポートフォワーディング
-smart-ssh production -L 8080:localhost:80
+smart-ssh -L 8080:localhost:80 production
 
 # 複数のSSHオプション
-smart-ssh production -v -p 2222 -L 8080:localhost:80
+smart-ssh -v -p 2222 -L 8080:localhost:80 production
+
+# リモートホストでコマンドを実行する。smart-sshはホスト名を境界として扱い、
+# それ以降をコマンドとする。ssh呼び出し時に`--`を挿入するため、sshがこれらを
+# 自身のオプションとして解釈することはない
+smart-ssh production uptime
+smart-ssh production df -h
 
 # --でsmart-sshとSSHオプションを明確に分離
-smart-ssh --dry-run -- production -v -p 2222
+smart-ssh --dry-run -- -v production
 
 # ネットワークに関係なくセキュリティキー認証を強制
 smart-ssh --security-key bastion
@@ -365,7 +371,7 @@ CLIが見つからない、デーモンが動作していない、`jq` が利用
 している場合はそちらを尊重します。
 
 判定は接続時に実際に使われるSSHオプションを反映します。したがって
-`smart-ssh myhost -o HostName=elsewhere` は `myhost` ではなく `elsewhere` に対する
+`smart-ssh -o HostName=elsewhere myhost` は `myhost` ではなく `elsewhere` に対する
 判定になり、`-F` で指定した設定ファイルにだけ存在するホストも認識されます。
 
 外部ネットワークからの接続では、セキュリティキーやOIDC証明書を固定する一時設定を
