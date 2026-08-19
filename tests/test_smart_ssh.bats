@@ -16,7 +16,9 @@ setup() {
 
     # Set test environment variables
     export HOME_NETWORK="192.168.1.0/24"
-    export SECURITY_KEY_PATH="/tmp/test_key"
+    # Inside TEST_CONFIG_DIR so teardown reclaims it. A path under /tmp survives
+    # the run, and a stale key there lets a test that should fail pass instead.
+    export SECURITY_KEY_PATH="$TEST_CONFIG_DIR/test_key"
     export NO_COLOR=1  # Disable color output for tests
 }
 
@@ -77,6 +79,22 @@ teardown() {
 # failure, which errexit does catch wherever it appears.
 # Usage: _assert_output_has <substring> / _refute_output_has <substring>
 #        _assert_output_matches <extended regex>
+# Assert the exact argv smart-ssh would run. The generated temp-config path
+# varies per run, so it is normalized to a fixed token and the rest compared
+# exactly — a substring or `.*` match would also accept the argv this fix
+# exists to prevent (the command appearing before the hostname as well as after).
+_assert_exec_line() {
+    local want="$1" got
+    got=$(printf '%s\n' "$output" | sed -n 's/.*Would execute: //p' | head -1 \
+        | sed 's#-F /[^ ]*#-F CONFIG#')
+    if [ "$got" = "$want" ]; then
+        return 0
+    fi
+    echo "expected exec line: $want" >&2
+    echo "actual exec line:   $got" >&2
+    return 1
+}
+
 _assert_output_matches() {
     if [[ "$output" =~ $1 ]]; then
         return 0
@@ -1382,10 +1400,12 @@ MOCK_TS
     mkdir -p "$TEST_CONFIG_DIR/.ssh"
     printf 'Host myhost\n    HostName myhost.tailnet-test.ts.net\n' \
         > "$TEST_CONFIG_DIR/.ssh/config"
+    # HOME_NETWORK below forces the away path, which needs the key to exist
+    touch "$SECURITY_KEY_PATH"
 
     run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
         HOME_NETWORK="192.0.2.0/24" \
-        "$SMART_SSH" --dry-run myhost -o HostName=external.example
+        "$SMART_SSH" --dry-run -o HostName=external.example myhost
     [ "$status" -eq 0 ]
     # The verdict is about the host ssh will actually reach, which is not a peer
     _refute_output_has "detected (Tailscale"
@@ -1424,7 +1444,7 @@ MOCK_TS
         > "$TEST_CONFIG_DIR/.ssh/config"
 
     run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
-        "$SMART_SSH" --dry-run myhost -o HostKeyAlias=mine
+        "$SMART_SSH" --dry-run -o HostKeyAlias=mine myhost
     [ "$status" -eq 0 ]
     _assert_output_has "-o HostName=100.64.10.2"
     _refute_output_has "HostKeyAlias=myhost.tailnet-test.ts.net"
@@ -1441,6 +1461,7 @@ MOCK_TS
     mkdir -p "$TEST_CONFIG_DIR/.ssh"
     printf 'Host external-host\n    HostName 203.0.113.1\n' \
         > "$TEST_CONFIG_DIR/.ssh/config"
+    touch "$SECURITY_KEY_PATH"
 
     run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
         HOME_NETWORK="192.0.2.0/24" \
@@ -2286,8 +2307,8 @@ echo 'ip_address: 100.64.0.1'")
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key custom-only \
-        -F "$TEST_CONFIG_DIR/custom_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/custom_config" custom-only
     [ "$status" -eq 0 ]
     # Exactly one -F, and it is not the caller's
     [ "$(echo "$output" | grep -c -- '-F ')" -eq 1 ]
@@ -2315,8 +2336,8 @@ echo 'ip_address: 100.64.0.1'")
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key custom-only \
-        -F "$TEST_CONFIG_DIR/custom_config" -v -L 8080:localhost:80
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/custom_config" -v -L 8080:localhost:80 custom-only
     [ "$status" -eq 0 ]
     _assert_output_matches 'Would execute:.* -v .*-L 8080:localhost:80'
 }
@@ -2335,8 +2356,8 @@ echo 'ip_address: 100.64.0.1'")
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key rich \
-        -F "$TEST_CONFIG_DIR/rich_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/rich_config" rich
     [ "$status" -eq 0 ]
 
     _assert_output_has "proxycommand /bin/nc %h %p"
@@ -2365,8 +2386,8 @@ echo 'ip_address: 100.64.0.1'")
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key rich \
-        -F "$TEST_CONFIG_DIR/rich_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/rich_config" rich
     [ "$status" -eq 0 ]
 
     # Recover the printed config and feed it back to ssh
@@ -2398,8 +2419,8 @@ echo 'ip_address: 100.64.0.1'")
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key front \
-        -F "$TEST_CONFIG_DIR/alias_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/alias_config" front
     [ "$status" -eq 0 ]
 
     # Feed the generated config back to ssh and ask what it would do
@@ -2435,8 +2456,8 @@ Host backend
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key front \
-        -F "$TEST_CONFIG_DIR/alias_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/alias_config" front
     [ "$status" -eq 0 ]
 
     echo "$output" | sed -n '/Temporary SSH config:/,$p' | tail -n +2 | sed 's/^  //' \
@@ -2466,8 +2487,8 @@ Host backend
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key withkey \
-        -F "$TEST_CONFIG_DIR/key_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/key_config" withkey
     [ "$status" -eq 0 ]
     _refute_output_has "/nonexistent/user_ondisk_key"
     _assert_output_has "IdentityFile $SECURITY_KEY_PATH"
@@ -2494,7 +2515,7 @@ Host backend
         OIDC_ENABLED=true OIDC_CERT_DIR="$cert_dir" \
         OIDC_ISSUER=https://issuer.invalid OIDC_CLIENT_ID=test \
         OIDC_CA_URL=https://ca.invalid \
-        "$SMART_SSH" --dry-run --oidc rich -F "$TEST_CONFIG_DIR/rich_config"
+        "$SMART_SSH" --dry-run --oidc -F "$TEST_CONFIG_DIR/rich_config" rich
     [ "$status" -eq 0 ]
 
     _assert_output_has "proxycommand /bin/nc %h %p"
@@ -2516,8 +2537,8 @@ Host backend
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key custom-only \
-        -F "$TEST_CONFIG_DIR/custom_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/custom_config" custom-only
     [ "$status" -eq 0 ]
     _assert_output_has "Host bastion"
     _assert_output_has "hostname bastion.example.com"
@@ -2537,8 +2558,8 @@ Host backend
 
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key custom-only \
-        "-F$TEST_CONFIG_DIR/custom_config"
+        "$SMART_SSH" --dry-run --security-key \
+        "-F$TEST_CONFIG_DIR/custom_config" custom-only
     [ "$status" -eq 0 ]
     _refute_output_has "-F$TEST_CONFIG_DIR/custom_config"
     # and the caller's config still reached the temporary one
@@ -2573,8 +2594,8 @@ Host backend
         OIDC_ENABLED=true OIDC_CERT_DIR="$cert_dir" \
         OIDC_ISSUER=https://issuer.invalid OIDC_CLIENT_ID=test \
         OIDC_CA_URL=https://ca.invalid \
-        "$SMART_SSH" --dry-run --oidc custom-only \
-        -F "$TEST_CONFIG_DIR/custom_config"
+        "$SMART_SSH" --dry-run --oidc \
+        -F "$TEST_CONFIG_DIR/custom_config" custom-only
 
     [ "$status" -eq 0 ]
     _assert_output_has "Would execute:"
@@ -2604,8 +2625,8 @@ Host backend
     touch "$SECURITY_KEY_PATH"
     run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
         SECURITY_KEY_PATH="$SECURITY_KEY_PATH" \
-        "$SMART_SSH" --dry-run --security-key custom-only \
-        -F "$TEST_CONFIG_DIR/custom_config"
+        "$SMART_SSH" --dry-run --security-key \
+        -F "$TEST_CONFIG_DIR/custom_config" custom-only
     [ "$status" -eq 0 ]
     _refute_output_has "not found"
     _assert_output_has "Would execute:"
@@ -2631,3 +2652,283 @@ EOF')
     [ "$status" -eq 0 ]
     _refute_output_has "not found"
 }
+
+
+# The tests below pin the away path with --security-key and a key inside
+# TEST_CONFIG_DIR. Both matter: the default path depends on the runner's own IP
+# (so home/away would vary by machine), and the suite-wide SECURITY_KEY_PATH
+# points outside the tree teardown reclaims, so a key created there survives
+# into later runs and lets a broken test pass on a littered /tmp.
+_setup_remote_command_host() {
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host myhost\n    HostName example.com\n' > "$HOME/.ssh/config"
+    touch "$TEST_CONFIG_DIR/sk"
+}
+
+# Test: the reported bug — a remote command was placed before the hostname, so
+# ssh read its first word as the destination and failed with "hostname contains
+# invalid characters". The command must follow the destination.
+@test "smart-ssh puts a remote command after the hostname" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost uptime"
+    _refute_output_has "uptime myhost"
+}
+
+# Test: options belong before the hostname and the command after it. ssh stops
+# parsing options at the destination, so the two cannot be interleaved.
+@test "smart-ssh keeps options before the hostname and the command after" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -p 2222 myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -p 2222 -- myhost uptime"
+    _refute_output_has "uptime myhost"
+}
+
+# Test: the destination ends option parsing. A dash-argument after it is part of
+# the remote command, not an ssh option to be hoisted ahead of the host — the
+# case that made `smart-ssh host -- --version` run `ssh --version host`.
+@test "smart-ssh treats a dash-argument after the hostname as remote command" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost uname -a
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost uname -a"
+}
+
+# Test: an option's value is not the remote command. `-p 2222` looks exactly
+# like `host uptime` — a dash-argument followed by a bare word — and only the
+# option's arity tells them apart. Getting this wrong swallowed every later
+# option into the command.
+@test "smart-ssh does not mistake an option value for a remote command" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -p 2222 -v myhost
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -p 2222 -v -- myhost"
+    _refute_output_has "myhost 2222"
+}
+
+# Test: a multi-word command stays one argument list rather than being split
+# into an option and a stray word.
+@test "smart-ssh preserves a multi-word remote command" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost df -h
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost df -h"
+}
+
+# Test: the -- form carries a remote command too, and must place it the same way.
+# Options still go before the hostname, as everywhere else.
+@test "smart-ssh handles a remote command after --" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -- -v myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -v -- myhost uptime"
+    _refute_output_has "uptime myhost"
+}
+
+# Test: the hostname ends option parsing inside the -- branch too. Its inner loop
+# tested for a dash BEFORE checking whether the hostname was already set, so an
+# option written as remote-command text was moved back ahead of the destination —
+# and an -oProxyCommand= there is executed by ssh on the LOCAL machine, turning
+# `smart-ssh -- "$host" "${cmd[@]}"` in a wrapper into local command execution.
+@test "smart-ssh does not hoist a dash-argument after the hostname through --" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -- myhost '-oProxyCommand=sh -c id' uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost -oProxyCommand=sh\\ -c\\ id uptime"
+    _refute_output_has "-oProxyCommand=sh -c id myhost"
+}
+
+# Test: the -- and bare forms must agree. A boundary that moves with -- is a
+# boundary an attacker picks, so pin both spellings to the same argv.
+@test "smart-ssh places a remote command identically with and without --" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -- myhost -v uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost -v uptime"
+}
+
+# Test: an attached option value must not swallow the hostname. `-oUser=bob`
+# ends in a value-taking letter, so a tail-matching arity test treats it as
+# `-o` plus a separate value and eats the destination — smart-ssh then resolves
+# credentials against the wrong host entirely.
+@test "smart-ssh does not let an attached option value swallow the hostname" {
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host myhost\n    HostName example.com\nHost uptime\n    HostName wrong.example\n' \
+        > "$HOME/.ssh/config"
+    touch "$TEST_CONFIG_DIR/sk"
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -oUser=bob myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_output_has "Target: myhost"
+    _refute_output_has "Target: uptime"
+    _assert_exec_line "ssh -F CONFIG -oUser=bob -- myhost uptime"
+}
+
+# Test: the same trap through a path-valued option, where the attached value
+# ends in a different value-taking letter
+@test "smart-ssh treats an attached path value as self-contained" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -i/keys/sub myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_output_has "Target: myhost"
+    _assert_exec_line "ssh -F CONFIG -i/keys/sub -- myhost uptime"
+}
+
+# Test: -Q comes from the second ssh(1) synopsis line and takes a value. Omitting
+# it from the arity set makes the query argument become the destination.
+@test "smart-ssh treats -Q as taking a value" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -Q cipher myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_output_has "Target: myhost"
+    _refute_output_has "Target: cipher"
+    _assert_exec_line "ssh -F CONFIG -Q cipher -- myhost uptime"
+}
+
+# Test: a genuine bundle of boolean flags ending in a value-taking letter still
+# consumes its value — the paired allow case for the two denials above, so a fix
+# that merely tightened the arity test would redden here.
+@test "smart-ssh keeps bundled flags ending in a value-taking option" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key -vp 2222 myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_output_has "Target: myhost"
+    _assert_exec_line "ssh -F CONFIG -vp 2222 -- myhost uptime"
+}
+
+# Test: every value-taking letter must consume its argument. The forwarding
+# options are the dangerous ones — their values (8080:localhost:80, user@jump)
+# look enough like a destination that dropping a letter silently connects
+# somewhere else rather than failing.
+@test "smart-ssh treats forwarding options as taking a value" {
+    _setup_remote_command_host
+
+    local opt val
+    for opt in -L -R -D -J -W; do
+        case "$opt" in
+            -D) val=1080 ;;
+            -J) val=jump.example ;;
+            -W) val=host:22 ;;
+            *)  val=8080:localhost:80 ;;
+        esac
+        run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+            SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+            "$SMART_SSH" --dry-run --security-key "$opt" "$val" myhost uptime
+        [ "$status" -eq 0 ] || { echo "failed for $opt $val"; return 1; }
+        _assert_output_has "Target: myhost"
+        _refute_output_has "Target: $val"
+    done
+}
+
+# Test: the OIDC path builds its command separately from the other two, so it
+# needs its own proof that the remote command lands after the hostname.
+@test "OIDC path puts a remote command after the hostname" {
+    command -v jq >/dev/null 2>&1 || skip "jq not available"
+    command -v curl >/dev/null 2>&1 || skip "curl not available"
+
+    export HOME="$TEST_CONFIG_DIR"
+    mkdir -p "$HOME/.ssh"
+    printf 'Host myhost\n    HostName example.com\n' > "$HOME/.ssh/config"
+
+    # A cached certificate the implementation will actually find — same shape as
+    # the other OIDC tests, so the run reaches the config-building code instead
+    # of stopping in the device flow.
+    local cert_dir="$TEST_CONFIG_DIR/oidc-certs"
+    mkdir -p "$cert_dir"
+    ssh-keygen -q -t ed25519 -N '' -f "$cert_dir/id_oidc" </dev/null
+    ssh-keygen -q -s "$cert_dir/id_oidc" -I test -n testuser \
+        -V +1h "$cert_dir/id_oidc.pub" </dev/null
+    [ -f "$cert_dir/id_oidc-cert.pub" ]
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        OIDC_ENABLED=true OIDC_CERT_DIR="$cert_dir" \
+        OIDC_ISSUER=https://issuer.invalid OIDC_CLIENT_ID=test \
+        OIDC_CA_URL=https://ca.invalid \
+        "$SMART_SSH" --dry-run --oidc myhost uptime
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost uptime"
+    _refute_output_has "uptime myhost"
+}
+
+# Test: an empty hostname is a caller bug (typically an unset variable), not an
+# absent argument. Testing emptiness alone would skip it and silently promote
+# the next argument to destination — connecting somewhere the caller never named.
+@test "smart-ssh rejects an empty hostname instead of using the next argument" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key "" myhost uptime
+    [ "$status" -ne 0 ]
+    _assert_output_has "Please specify a hostname"
+    _refute_output_has "Would execute:"
+}
+
+# Test: the dry run must describe the command that would actually run. Rendering
+# the argv with "${array[*]}" flattens quoting, so one argument containing spaces
+# prints as several — and a user auditing a destructive command before running it
+# would be reading a different command than the one that executes.
+@test "dry run renders a spaced remote-command argument as one argument" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost echo 'a  b'
+    [ "$status" -eq 0 ]
+    _assert_exec_line "ssh -F CONFIG -- myhost echo a\\ \\ b"
+}
+
+# Test: print_* use `echo -e`, so an unescaped remote-command word containing a
+# backslash escape would emit real terminal control characters into the operator's
+# terminal. The rendered form must stay inert.
+@test "dry run does not emit terminal escapes from a remote-command argument" {
+    _setup_remote_command_host
+
+    run env HOME="$TEST_CONFIG_DIR" NO_COLOR=1 TAILSCALE_AS_HOME=false \
+        SECURITY_KEY_PATH="$TEST_CONFIG_DIR/sk" \
+        "$SMART_SSH" --dry-run --security-key myhost 'x\033[31mRED'
+    [ "$status" -eq 0 ]
+    # The escape stays literal text, and no ESC (0x1b) byte reaches the output
+    _assert_exec_line "ssh -F CONFIG -- myhost x\\033\\[31mRED"
+    [ "$(printf '%s' "$output" | tr -d '\033' | wc -c)" -eq "$(printf '%s' "$output" | wc -c)" ]
+}
+

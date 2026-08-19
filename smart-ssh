@@ -235,6 +235,15 @@ print_debug() {
     echo -e "${COLOR_BLUE}$*${COLOR_RESET}"
 }
 
+# Render an argv for display. Two reasons this cannot be "${array[*]}":
+# quoting is lost, so a single argument containing spaces prints as several and
+# the shown command stops matching the one that runs; and print_* use `echo -e`,
+# so a remote-command word containing \033 would emit real terminal escapes.
+# %q quotes both back into something inert and copy-pasteable.
+render_argv() {
+    printf '%q ' "$@" | sed 's/ $//'
+}
+
 # Logging functions with log level support
 log_error() {
     if [ "$CURRENT_LOG_LEVEL" -le "$LOG_LEVEL_ERROR" ]; then
@@ -262,14 +271,16 @@ log_debug() {
 
 # Show usage information
 usage() {
-    echo "Usage: $0 [OPTIONS] <hostname> [SSH_OPTIONS]"
+    echo "Usage: $0 [OPTIONS] [SSH_OPTIONS] <hostname> [COMMAND ...]"
     echo ""
     echo "Examples:"
     echo "  $0 hostname"
     echo "  $0 production-server"
-    echo "  $0 hostname -v                    # Pass -v to ssh for verbose output"
-    echo "  $0 hostname -p 2222               # Use custom SSH port"
-    echo "  $0 -- hostname -v -p 2222         # Use -- to separate options"
+    echo "  $0 -v hostname                    # Pass -v to ssh for verbose output"
+    echo "  $0 -p 2222 hostname               # Use custom SSH port"
+    echo "  $0 hostname uptime                # Run a command on the remote host"
+    echo "  $0 hostname df -h                 # Its arguments go to the remote too"
+    echo "  $0 -- -v hostname                 # Use -- to separate options"
     echo "  HOME_GATEWAY_MAC=aa:bb:cc:dd:ee:ff $0 hostname  # Use MAC-based detection"
     echo "  HOME_NETWORK=192.168.1.0/24,10.0.0.0/24 $0 hostname"
     echo "  SECURITY_KEY_PATH=~/.ssh/id_ecdsa_sk $0 --security-key hostname"
@@ -287,11 +298,13 @@ usage() {
     echo "  --debug, -d          Show debug information"
     echo "  --help, -h           Show this help message"
     echo "  --version            Show version information"
-    echo "  --                   End of smart-ssh options (remaining args are SSH options)"
+    echo "  --                   End of smart-ssh options (SSH options may follow,"
+    echo "                       then the hostname, then the remote command)"
     echo ""
     echo "SSH Options:"
     echo "  Any SSH options (like -v, -p, -L, etc.) are passed through to ssh."
-    echo "  Place them after the hostname or use -- to separate them clearly."
+    echo "  Place them BEFORE the hostname. As with ssh itself, the hostname ends"
+    echo "  option parsing: everything after it is the command to run remotely."
     echo ""
     echo "Configuration:"
     echo "  Config file: $CONFIG_FILE"
@@ -1559,10 +1572,17 @@ ssh_with_oidc() {
     # Built once so the dry run cannot describe a command different from the
     # one that would run. The caller's own -F is deliberately absent: see
     # _split_ssh_config_options.
-    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" "$hostname")
+    # `--` before the destination is what actually closes the option class: ssh
+    # RESUMES option parsing after the destination and keeps going until the
+    # first non-option word, so a caller's -F written after the hostname would
+    # otherwise still be read as an option and replace this temporary config —
+    # discarding the IdentitiesOnly/IdentityAgent restrictions it exists to
+    # impose. Nothing is lost: the temp config is generated from `ssh -G` output
+    # that already merged the caller's -F.
+    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")
 
     if [ "$dry_run" = true ]; then
-        print_info "[DRY RUN] Would execute: ${ssh_command[*]}"
+        print_info "[DRY RUN] Would execute: $(render_argv "${ssh_command[@]}")"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1570,7 +1590,7 @@ ssh_with_oidc() {
         return 0
     fi
 
-    log_debug "Executing: ${ssh_command[*]}"
+    log_debug "Executing: $(render_argv "${ssh_command[@]}")"
     "${ssh_command[@]}"
 }
 
@@ -1618,6 +1638,43 @@ _write_effective_config() {
 # config is generated from `ssh -G` output that already merged it.
 SSH_CONFIG_OPTIONS=()
 SSH_OTHER_OPTIONS=()
+
+# The remote command, if the caller gave one. Kept apart from the SSH options
+# because ssh requires it AFTER the destination, while options go before.
+SSH_REMOTE_COMMAND=()
+
+# True when an SSH option consumes the FOLLOWING argument as its value. Needed
+# to tell `-p 2222` (option plus separate value) from `host uptime` (destination
+# plus remote command): both look like a bare word after a dash-argument, and
+# only the arity distinguishes them.
+#
+# Both letter sets below are transcribed from the ssh(1) SYNOPSIS, which has two
+# forms — the main one and `ssh [-Q query_option]`. Re-derive from both when
+# updating; taking only the first drops -Q.
+#
+# The test is on the position of the option letter, not on the argument's last
+# character. An attached value (-p2222, -oUser=bob) is self-contained, and its
+# final byte belongs to the value: matching the tail would make -oUser=bob (ends
+# in 'b') swallow the hostname that follows it.
+_SSH_VALUE_OPTS='BbcDEeFIiJLlmOoPpQRSWw'
+_SSH_FLAG_OPTS='46AaCfGgKkMNnqsTtVvXxYy'
+_ssh_option_takes_value() {
+    local opt="$1"
+    case "$opt" in
+        # Bare value-taking option: the value must be the next argument
+        -["$_SSH_VALUE_OPTS"]) return 0 ;;
+        # Bundled boolean flags ending in a value-taking letter, e.g. `ssh -vp 2222`.
+        # Every character before the last must itself be a flag, or what looks
+        # like a bundle is really an attached value.
+        -["$_SSH_FLAG_OPTS"]*["$_SSH_VALUE_OPTS"])
+            case "${opt#-}" in
+                *[!"$_SSH_FLAG_OPTS"]*["$_SSH_VALUE_OPTS"]) return 1 ;;
+            esac
+            return 0
+            ;;
+    esac
+    return 1
+}
 _split_ssh_config_options() {
     SSH_CONFIG_OPTIONS=()
     SSH_OTHER_OPTIONS=()
@@ -1704,12 +1761,14 @@ ssh_from_home() {
     print_info "Target: $hostname"
 
     if [ "$dry_run" = true ]; then
-        print_debug "[DRY RUN] Would execute: ssh ${ssh_options[*]} $hostname"
+        print_debug "[DRY RUN] Would execute: $(render_argv ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")"
         return 0
     fi
 
-    log_debug "Executing: ssh ${ssh_options[*]} $hostname"
-    ssh "${ssh_options[@]}" "$hostname"
+    # See the comment at the away-path exec site: `--` is what stops ssh reading
+    # a post-hostname argument as an option.
+    log_debug "Executing: $(render_argv ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")"
+    ssh "${ssh_options[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}"
 }
 
 # Connect from away (security key authentication)
@@ -1855,10 +1914,17 @@ ssh_from_away() {
     # Built once so the dry run cannot describe a command different from the
     # one that would run. The caller's own -F is deliberately absent: see
     # _split_ssh_config_options.
-    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" "$hostname")
+    # `--` before the destination is what actually closes the option class: ssh
+    # RESUMES option parsing after the destination and keeps going until the
+    # first non-option word, so a caller's -F written after the hostname would
+    # otherwise still be read as an option and replace this temporary config —
+    # discarding the IdentitiesOnly/IdentityAgent restrictions it exists to
+    # impose. Nothing is lost: the temp config is generated from `ssh -G` output
+    # that already merged the caller's -F.
+    local ssh_command=(ssh -F "$temp_config" "${SSH_OTHER_OPTIONS[@]}" -- "$hostname" "${SSH_REMOTE_COMMAND[@]}")
 
     if [ "$dry_run" = true ]; then
-        print_info "[DRY RUN] Would execute: ${ssh_command[*]}"
+        print_info "[DRY RUN] Would execute: $(render_argv "${ssh_command[@]}")"
         print_info "[DRY RUN] Temporary SSH config:"
         while IFS= read -r line; do
             print_info "  $line"
@@ -1866,20 +1932,32 @@ ssh_from_away() {
         return 0
     fi
 
-    log_debug "Executing: ${ssh_command[*]}"
+    log_debug "Executing: $(render_argv "${ssh_command[@]}")"
     "${ssh_command[@]}"
 }
 
 # Main function
 main() {
     local hostname=""
+    local hostname_set=false
     local force_security_key=false
     local dry_run=false
     FORCE_OIDC=false
     local ssh_options=()
+    SSH_REMOTE_COMMAND=()
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
+        # The hostname ends option parsing, exactly as it does for ssh itself:
+        # everything after the destination is the remote command. This runs
+        # before the case below because smart-ssh's own --help/-d would
+        # otherwise capture `smart-ssh host --help`, which the user means to run
+        # on the remote, and -*) would hoist a dash-leading command ahead of the
+        # destination.
+        if [ "$hostname_set" = true ]; then
+            SSH_REMOTE_COMMAND=("$@")
+            break
+        fi
         case $1 in
             --security-key|-s)
                 force_security_key=true
@@ -1910,31 +1988,65 @@ main() {
                 shift
                 ;;
             --)
-                # End of smart-ssh options, rest are SSH options
+                # End of smart-ssh options. What follows is for ssh, but it may
+                # still contain the hostname (documented as `-- host -v`), and
+                # anything after that hostname is the remote command.
                 shift
-                ssh_options+=("$@")
+                while [[ $# -gt 0 ]]; do
+                    # The hostname ends option parsing here too. Testing for a
+                    # dash first would let `-- host -oProxyCommand=...` move an
+                    # option the user wrote as remote-command text back ahead of
+                    # the destination, where ssh executes it locally.
+                    if [ "$hostname_set" = true ]; then
+                        SSH_REMOTE_COMMAND=("$@")
+                        break
+                    fi
+                    if [[ "$1" == -* ]]; then
+                        ssh_options+=("$1")
+                        if _ssh_option_takes_value "$1" && [ $# -gt 1 ]; then
+                            ssh_options+=("$2")
+                            shift
+                        fi
+                        shift
+                    else
+                        hostname="$1"
+                        hostname_set=true
+                        shift
+                    fi
+                done
                 break
                 ;;
             -*)
-                # Could be SSH option, collect it
+                # Options taking a separate value (`-p 2222`, `-F path`) must
+                # swallow that value here, or the loop below would mistake it for
+                # the remote command.
                 ssh_options+=("$1")
+                if _ssh_option_takes_value "$1" && [ $# -gt 1 ]; then
+                    ssh_options+=("$2")
+                    shift
+                fi
                 shift
                 ;;
             *)
                 # First non-option argument is hostname
-                if [ -z "$hostname" ]; then
+                if [ "$hostname_set" = false ]; then
                     hostname="$1"
+                    hostname_set=true
                     shift
                 else
-                    # Additional arguments are SSH options or remote command
-                    ssh_options+=("$1")
-                    shift
+                    # Everything after the hostname is the remote command. ssh
+                    # itself stops parsing options there, so it must not be
+                    # mixed into ssh_options: those are placed BEFORE the
+                    # hostname, where ssh would read the command's first word
+                    # as the destination instead.
+                    SSH_REMOTE_COMMAND=("$@")
+                    break
                 fi
                 ;;
         esac
     done
 
-    if [ -z "$hostname" ]; then
+    if [ "$hostname_set" = false ] || [ -z "$hostname" ]; then
         print_error "Error: Please specify a hostname"
         usage
         exit 1
