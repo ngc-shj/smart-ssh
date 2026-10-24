@@ -854,9 +854,16 @@ tailscale_peer_ip() {
 # alias would vouch for a host nobody is connecting to. Also sets
 # TAILSCALE_HOST_KEY_ALIAS to the name known_hosts should be keyed on, or
 # empty when the config already sets HostKeyAlias and ours must not override.
+#
+# Why a host was not vouched for (no jq, no CLI, daemon down, not a peer) is
+# only logged at debug here, with the explanation left in TAILSCALE_MISS_REASON:
+# on TAILSCALE_AS_HOME this runs for every host, so a LAN address the later
+# checks place at home would draw a warning on each connection. The caller
+# warns only if the verdict is away.
 TAILSCALE_PEER_IP=""
 TAILSCALE_HOST_KEY_ALIAS=""
 TAILSCALE_RESOLVED_HOST=""
+TAILSCALE_MISS_REASON=""
 is_tailscale_host() {
     local hostname="$1"
     shift
@@ -864,6 +871,7 @@ is_tailscale_host() {
     TAILSCALE_PEER_IP=""
     TAILSCALE_HOST_KEY_ALIAS=""
     TAILSCALE_RESOLVED_HOST=""
+    TAILSCALE_MISS_REASON=""
 
     # Resolve the config as ssh will see it, options included
     local ssh_config
@@ -885,25 +893,29 @@ is_tailscale_host() {
     log_debug "Tailscale check: resolved HostName=$resolved_host"
 
     if ! command -v jq >/dev/null 2>&1; then
-        log_warn "jq not found; cannot verify $resolved_host is a Tailscale node, treating as external"
+        TAILSCALE_MISS_REASON="jq not found; cannot verify $resolved_host is a Tailscale node, treating as external"
+        log_debug "Tailscale check: jq not found"
         return 1
     fi
 
     if ! find_tailscale_cli; then
-        log_warn "Tailscale CLI not found; cannot verify $resolved_host is a Tailscale node, treating as external"
+        TAILSCALE_MISS_REASON="Tailscale CLI not found; cannot verify $resolved_host is a Tailscale node, treating as external"
+        log_debug "Tailscale check: CLI not found"
         return 1
     fi
     local tailscale_cli="$TAILSCALE_CLI"
 
     if ! "$tailscale_cli" status >/dev/null 2>&1; then
-        log_warn "Tailscale daemon is not running; cannot verify $resolved_host is a Tailscale node, treating as external"
+        TAILSCALE_MISS_REASON="Tailscale daemon is not running; cannot verify $resolved_host is a Tailscale node, treating as external"
+        log_debug "Tailscale check: daemon is not running"
         return 1
     fi
 
     local peer_ip
     peer_ip=$(tailscale_peer_ip "$tailscale_cli" "$resolved_host")
     if [ -z "$peer_ip" ]; then
-        log_warn "$resolved_host is not a node on this tailnet (matched against tailnet addresses and MagicDNS names); treating as external. If it is reached over Tailscale under a different name, set HostName to its MagicDNS name or tailnet address, or use HOME_GATEWAY_MAC/HOME_NETWORK."
+        TAILSCALE_MISS_REASON="$resolved_host is not a node on this tailnet (matched against tailnet addresses and MagicDNS names); treating as external. If it is reached over Tailscale under a different name, set HostName to its MagicDNS name or tailnet address, or use HOME_GATEWAY_MAC/HOME_NETWORK."
+        log_debug "Tailscale check: $resolved_host is not in the daemon's peer list"
         return 1
     fi
 
@@ -2226,6 +2238,9 @@ main() {
         print_success "Home network detected ($detection_method: $detected_value)"
         ssh_from_home "$hostname" "$dry_run" "${ssh_options[@]}"
     else
+        if [ -n "$TAILSCALE_MISS_REASON" ]; then
+            log_warn "$TAILSCALE_MISS_REASON"
+        fi
         print_warning "External network detected ($detection_method: $detected_value)"
         if should_use_oidc; then
             local oidc_exit_code=0

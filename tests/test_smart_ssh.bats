@@ -869,8 +869,9 @@ HEADER
     done
 
     # Report the address the daemon vouched for, so a test can assert the
-    # connection would be pinned to it rather than re-resolved
-    echo "is_tailscale_host \"$test_hostname\" || exit 1" >> "$_tmp"
+    # connection would be pinned to it rather than re-resolved — or, on a
+    # refusal, the reason main() would warn with once the verdict is away
+    echo "is_tailscale_host \"$test_hostname\" || { printf 'TAILSCALE_MISS_REASON=%s\n' \"\$TAILSCALE_MISS_REASON\"; exit 1; }" >> "$_tmp"
     echo 'printf "TAILSCALE_PEER_IP=%s\n" "$TAILSCALE_PEER_IP"' >> "$_tmp"
     echo "$_tmp"
 }
@@ -1018,7 +1019,7 @@ MOCK_TS
 
     run bash "$test_script"
     [ "$status" -eq 1 ]
-    _assert_output_has "CLI not found"
+    _assert_output_has "TAILSCALE_MISS_REASON=Tailscale CLI not found"
     _assert_output_has "treating as external"
 }
 
@@ -1055,7 +1056,7 @@ MOCK_TS
 
     run bash "$test_script"
     [ "$status" -eq 1 ]
-    _assert_output_has "daemon is not running"
+    _assert_output_has "TAILSCALE_MISS_REASON=Tailscale daemon is not running"
     _assert_output_has "treating as external"
 }
 
@@ -1072,7 +1073,7 @@ MOCK_TS
 
     run bash "$test_script"
     [ "$status" -eq 1 ]
-    _assert_output_has "jq"
+    _assert_output_has "TAILSCALE_MISS_REASON=jq not found"
     _assert_output_has "treating as external"
 }
 
@@ -1260,7 +1261,7 @@ MOCK_TS
     run bash "$test_script"
     [ "$status" -eq 1 ]
     [ ! -e "$TEST_CONFIG_DIR/whois_arg" ]
-    _assert_output_has "not a node on this tailnet"
+    _assert_output_has "TAILSCALE_MISS_REASON=203.0.113.1 is not a node on this tailnet"
 }
 
 # Test: a name that merely looks like a tailnet member is not one. Only the
@@ -1449,6 +1450,105 @@ MOCK_TS
     _assert_output_has "-o HostName=100.64.10.2"
     _refute_output_has "HostKeyAlias=myhost.tailnet-test.ts.net"
     _assert_output_has "-o HostKeyAlias=mine"
+}
+
+# Helper: stub every source get_current_ip reads (ip on Linux, route and
+# ifconfig on macOS) so the IP check sees <address> instead of the runner's own
+# Usage: _stub_current_ip <mock_dir> <address>
+_stub_current_ip() {
+    local mock_dir="$1"
+    local address="$2"
+    printf '#!/bin/bash\necho "8.8.8.8 via 192.0.2.254 dev eth0 src %s uid 1000"\n' \
+        "$address" > "$mock_dir/ip"
+    printf '#!/bin/bash\necho "  interface: en0"\n' > "$mock_dir/route"
+    printf '#!/bin/bash\necho "\tinet %s netmask 0xffffff00"\n' \
+        "$address" > "$mock_dir/ifconfig"
+    chmod +x "$mock_dir/ip" "$mock_dir/route" "$mock_dir/ifconfig"
+}
+
+# Test: a LAN host that the IP check places at home draws no Tailscale warning.
+# With TAILSCALE_AS_HOME every destination is asked about first, so warning on
+# the miss itself would fire on every home connection to a non-tailnet host.
+@test "smart-ssh does not warn about a non-tailnet host on the home network" {
+    local mock_dir
+    mock_dir=$(_make_ts_mocks "192.168.20.12")
+    _make_tailscale_mock "$mock_dir" tailscale up
+    _assert_ts_mocks_live "$mock_dir" "192.168.20.12"
+    _stub_current_ip "$mock_dir" "192.168.11.5"
+
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    printf 'Host island\n    HostName 192.168.20.12\n' \
+        > "$TEST_CONFIG_DIR/.ssh/config"
+
+    run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
+        HOME_NETWORK="192.168.11.0/24" \
+        "$SMART_SSH" --dry-run island
+    [ "$status" -eq 0 ]
+    _assert_output_has "Home network detected (IP: 192.168.11.5)"
+    _refute_output_has "not a node on this tailnet"
+}
+
+# Test: the same miss still explains itself when the verdict is away, since
+# that is when the user is left asking why the security key was required
+@test "smart-ssh warns about a non-tailnet host on an external network" {
+    local mock_dir
+    mock_dir=$(_make_ts_mocks "192.168.20.12")
+    _make_tailscale_mock "$mock_dir" tailscale up
+    _assert_ts_mocks_live "$mock_dir" "192.168.20.12"
+    _stub_current_ip "$mock_dir" "198.51.100.7"
+
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    printf 'Host island\n    HostName 192.168.20.12\n' \
+        > "$TEST_CONFIG_DIR/.ssh/config"
+    touch "$SECURITY_KEY_PATH"
+
+    run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
+        HOME_NETWORK="192.168.11.0/24" \
+        "$SMART_SSH" --dry-run island
+    [ "$status" -eq 0 ]
+    _assert_output_has "External network detected (IP: 198.51.100.7)"
+    _assert_output_has "[WARN] 192.168.20.12 is not a node on this tailnet"
+}
+
+# Test: a stopped daemon is held back the same way. Someone who runs Tailscale
+# only while away would otherwise be warned on every connection from home.
+@test "smart-ssh does not warn about a stopped daemon on the home network" {
+    local mock_dir
+    mock_dir=$(_make_ts_mocks "192.168.20.12")
+    _make_tailscale_mock "$mock_dir" tailscale down
+    _assert_ts_mocks_live "$mock_dir" "192.168.20.12"
+    _stub_current_ip "$mock_dir" "192.168.11.5"
+
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    printf 'Host island\n    HostName 192.168.20.12\n' \
+        > "$TEST_CONFIG_DIR/.ssh/config"
+
+    run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
+        HOME_NETWORK="192.168.11.0/24" \
+        "$SMART_SSH" --dry-run island
+    [ "$status" -eq 0 ]
+    _assert_output_has "Home network detected (IP: 192.168.11.5)"
+    _refute_output_has "daemon is not running"
+}
+
+@test "smart-ssh warns about a stopped daemon on an external network" {
+    local mock_dir
+    mock_dir=$(_make_ts_mocks "192.168.20.12")
+    _make_tailscale_mock "$mock_dir" tailscale down
+    _assert_ts_mocks_live "$mock_dir" "192.168.20.12"
+    _stub_current_ip "$mock_dir" "198.51.100.7"
+
+    mkdir -p "$TEST_CONFIG_DIR/.ssh"
+    printf 'Host island\n    HostName 192.168.20.12\n' \
+        > "$TEST_CONFIG_DIR/.ssh/config"
+    touch "$SECURITY_KEY_PATH"
+
+    run env PATH="$mock_dir:$PATH" NO_COLOR=1 HOME="$TEST_CONFIG_DIR" \
+        HOME_NETWORK="192.168.11.0/24" \
+        "$SMART_SSH" --dry-run island
+    [ "$status" -eq 0 ]
+    _assert_output_has "External network detected (IP: 198.51.100.7)"
+    _assert_output_has "[WARN] Tailscale daemon is not running"
 }
 
 # Test: the away path is not pinned — nothing vouched for an address there
